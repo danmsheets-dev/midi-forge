@@ -173,6 +173,31 @@ impl Default for Matcher {
 }
 
 impl Matcher {
+    /// Capture a CC or note into a tight matcher (this number, this channel).
+    pub fn learn_from(packet: &UmpMessage) -> Option<Self> {
+        let packet = if packet.message_type() == 0x4 {
+            crate::midi2::downscale_to_midi1(packet)
+                .into_iter()
+                .find(|p| p.message_type() == 0x2)?
+        } else {
+            *packet
+        };
+        let kind = VoiceKind::from_packet(&packet)?;
+        if matches!(kind, VoiceKind::NoteOn) && packet.data2() == 0 {
+            return None;
+        }
+        let ch = packet.channel()?;
+        let d1 = packet.data1();
+        Some(Self {
+            kind: MatchKind::One(kind),
+            channels: 1 << ch.min(15),
+            data1_min: d1,
+            data1_max: d1,
+            data2_min: 0,
+            data2_max: 127,
+        })
+    }
+
     pub fn matches(&self, packet: &UmpMessage) -> bool {
         let Some(kind) = VoiceKind::from_packet(packet) else {
             return false;
@@ -309,6 +334,44 @@ impl Default for DataMap {
 }
 
 impl DataMap {
+    /// Insert a learned matcher at the front (first match wins). Identity rewrite.
+    pub fn learn_insert(&mut self, packet: &UmpMessage) -> Option<String> {
+        let matcher = Matcher::learn_from(packet)?;
+        let label = match matcher.kind {
+            MatchKind::One(VoiceKind::ControlChange) => {
+                format!(
+                    "CC{} Ch{}",
+                    matcher.data1_min,
+                    matcher.channels.trailing_zeros() + 1
+                )
+            }
+            MatchKind::One(VoiceKind::NoteOn) => {
+                format!(
+                    "Note {} Ch{}",
+                    matcher.data1_min,
+                    matcher.channels.trailing_zeros() + 1
+                )
+            }
+            MatchKind::One(k) => {
+                format!("{} Ch{}", k.label(), matcher.channels.trailing_zeros() + 1)
+            }
+            _ => "voice".into(),
+        };
+        self.entries.insert(
+            0,
+            MapEntry {
+                matcher,
+                action: MapAction::Rewrite {
+                    kind: None,
+                    channel: None,
+                    data1: ValueMap::Keep,
+                    data2: ValueMap::Keep,
+                },
+            },
+        );
+        Some(label)
+    }
+
     pub fn apply(&self, packet: &UmpMessage) -> Option<UmpMessage> {
         if VoiceKind::from_packet(packet).is_none() {
             return Some(*packet);
@@ -531,5 +594,17 @@ mod tests {
         assert_eq!(out.message_type(), 0x4);
         assert_eq!(out.data1(), 62);
         assert_eq!(out.words()[1], 0xFFFF_0000);
+    }
+
+    #[test]
+    fn learn_cc_inserts_front() {
+        let mut map = DataMap::default();
+        let label = map.learn_insert(&cc(74, 40)).unwrap();
+        assert!(label.contains("CC74"));
+        assert_eq!(map.entries.len(), 1);
+        assert_eq!(map.entries[0].matcher.data1_min, 74);
+        assert_eq!(map.entries[0].matcher.data1_max, 74);
+        assert!(Matcher::learn_from(&clock()).is_none());
+        assert!(Matcher::learn_from(&note_on(60, 0)).is_none());
     }
 }

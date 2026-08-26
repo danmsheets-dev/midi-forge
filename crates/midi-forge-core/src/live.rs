@@ -91,6 +91,34 @@ impl LiveView {
             _ => {}
         }
     }
+
+    pub fn dump(&self) -> String {
+        let mut s = String::from("Live\n");
+        for (i, ch) in self.ch.iter().enumerate() {
+            if !ch.dirty && ch.sounding == 0 && ch.last_cc.is_none() {
+                continue;
+            }
+            let note = ch
+                .last_note
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "—".into());
+            let cc = ch
+                .last_cc
+                .map(|(n, v)| format!("{}={v}", crate::cc::cc_label(n)))
+                .unwrap_or_else(|| "—".into());
+            s.push_str(&format!(
+                "  Ch{} note {note} n={} prog {} {cc} bend {}\n",
+                i + 1,
+                ch.sounding,
+                ch.program,
+                ch.bend
+            ));
+        }
+        if s == "Live\n" {
+            s.push_str("  (silent)\n");
+        }
+        s
+    }
 }
 
 #[cfg(test)]

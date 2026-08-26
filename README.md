@@ -30,6 +30,8 @@ Lua: the right panel **Lua** tab. **Apply** compiles, **Enable** runs `on_midi` 
 
 **Live** is a ShowMIDI-style “now” view (notes sounding, last CC, bend per channel) above the monitor. Named CCs appear in the log (`CC7 (Volume)`); RPN/NRPN assemble from CC 98–101. **MIDI-CI** next to Identity sends a Discovery inquiry. Endpoints show whether MidiSrv / `midi.exe` are present — native UMP `MidiSession` still needs the Windows MIDI Services App SDK.
 
+**Clock** shows host-receive BPM, jitter, runaway clock, song position, and MTC. Histograms are USB/driver timing, not 5-pin delay. **Thru path** lists which outputs a note actually hit. **Snap** copies live + clock + stuck notes + recent thru. **Learn** on a thru map waits for the next CC/note. Exclusive-open errors name likely DAWs from window titles. **On top** + a larger **PANIC** are for the live bench.
+
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 
 ## Crates

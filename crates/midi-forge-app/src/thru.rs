@@ -230,6 +230,20 @@ fn map_editor(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     ui.label("Data map — first match wins");
     ui.checkbox(&mut map.pass_unmatched, "Pass unmatched channel-voice");
     ui.horizontal_wrapped(|ui| {
+        let learning = app.learn == Some((from, to));
+        let learn_label = if learning { "Listening…" } else { "Learn" };
+        if ui
+            .button(learn_label)
+            .on_hover_text("Next CC or note on this input fills a matcher row")
+            .clicked()
+        {
+            app.learn = if learning { None } else { Some((from, to)) };
+            app.status = if app.learn.is_some() {
+                "MIDI learn: play a CC or note".into()
+            } else {
+                "Learn cancelled".into()
+            };
+        }
         if ui.button("Add row").clicked() {
             map.entries.push(MapEntry {
                 matcher: Matcher::default(),

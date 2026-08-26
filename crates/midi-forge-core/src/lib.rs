@@ -20,8 +20,10 @@ mod mpe;
 mod nrpn;
 mod panic;
 mod profile;
+mod route;
 mod router;
 mod sysex;
+mod timing;
 mod ump;
 
 pub use cc::{cc_label, cc_name};
@@ -47,9 +49,11 @@ pub use mpe::{
 pub use nrpn::{NrpnTracker, ParamKind, ParamValue, rpn_name};
 pub use panic::panic_packets;
 pub use profile::{PROFILE_VERSION, Profile, ProfileLink};
+pub use route::{RouteEvent, RouteLog};
 pub use router::{Link, Router};
 pub use sysex::{
     IDENTITY_REQUEST, IdentityReply, SysexAssembler, SysexDump, SysexError, dumps_from_hex,
     dumps_from_syx, dumps_to_syx, hex_diff, parse_identity_reply, roland_checksum_from_sum,
 };
+pub use timing::{ClockHealth, IntervalHist, MtcState, Transport};
 pub use ump::UmpMessage;

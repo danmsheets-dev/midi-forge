@@ -10,6 +10,10 @@ pub fn live_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         if ui.small_button("Reset").clicked() {
             app.live = midi_forge_core::LiveView::new();
         }
+        if ui.small_button("Snapshot").clicked() {
+            ui.ctx().copy_text(app.snapshot_text());
+            app.status = "Snapshot copied".into();
+        }
     });
     let row_h = 16.0;
     egui::ScrollArea::vertical()

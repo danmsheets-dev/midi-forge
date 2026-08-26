@@ -3,12 +3,15 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use midi_forge_core::{
-    HangTracker, LiveView, MessageKind, MidiEvent, MonitorLog, MpeTracker, NrpnTracker, PortId,
-    Profile, ProfileLink, Router, SysexAssembler, UmpMessage, decode, format_wire_hex,
-    message_kind, panic_packets,
+    ClockHealth, HangTracker, LiveView, MessageKind, MidiEvent, MonitorLog, MpeTracker,
+    NrpnTracker, PortId, Profile, ProfileLink, RouteEvent, RouteLog, Router, SysexAssembler,
+    UmpMessage, decode, format_wire_hex, message_kind, panic_packets,
 };
-use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, default_backend, probe_wms};
+use midi_forge_io::{
+    Direction, Endpoint, EndpointId, MidiBackend, default_backend, explain_in_use, probe_wms,
+};
 
+use crate::clock;
 use crate::inject;
 use crate::live;
 use crate::mpe;
@@ -67,6 +70,11 @@ pub struct MidiForgeApp {
     pub(crate) throttle_ms: u32,
     throttle_q: HashMap<String, VecDeque<UmpMessage>>,
     throttle_at: HashMap<String, Instant>,
+    pub(crate) clock: ClockHealth,
+    pub(crate) routes: RouteLog,
+    pub(crate) learn: Option<(PortId, PortId)>,
+    pub(crate) always_on_top: bool,
+    host_epoch: Instant,
 }
 
 impl MidiForgeApp {
@@ -126,6 +134,11 @@ impl MidiForgeApp {
             activity: HashMap::new(),
             last_hotplug: Instant::now(),
             device_fp: String::new(),
+            clock: ClockHealth::new(),
+            routes: RouteLog::default(),
+            learn: None,
+            always_on_top: false,
+            host_epoch: Instant::now(),
             throttle_ms: 0,
             throttle_q: HashMap::new(),
             throttle_at: HashMap::new(),
@@ -172,7 +185,7 @@ impl MidiForgeApp {
             }
             self.backend
                 .open_input(id, port)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| self.open_err(id, &e))?;
             self.open_inputs.insert(id.0.clone());
             self.port_errors.remove(&id.0);
         } else if self.open_inputs.remove(&id.0) {
@@ -189,7 +202,7 @@ impl MidiForgeApp {
             }
             self.backend
                 .open_output(id, port)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| self.open_err(id, &e))?;
             self.open_outputs.insert(id.0.clone());
             self.port_errors.remove(&id.0);
         } else if self.open_outputs.remove(&id.0) {
@@ -219,6 +232,20 @@ impl MidiForgeApp {
         Ok(())
     }
 
+    fn open_err(&self, id: &EndpointId, err: &midi_forge_io::IoError) -> String {
+        let name = self
+            .endpoints
+            .iter()
+            .find(|e| e.id == *id)
+            .map(|e| e.name.as_str())
+            .unwrap_or(&id.0);
+        explain_in_use(err, name)
+    }
+
+    fn host_ns(&self) -> u64 {
+        self.host_epoch.elapsed().as_nanos() as u64
+    }
+
     fn drain_capture(&mut self) {
         self.capture_buf.clear();
         self.dropped = self.backend.poll(&mut self.capture_buf);
@@ -233,11 +260,22 @@ impl MidiForgeApp {
             if let Some(ep) = self.endpoint_by_port.get(&event.port) {
                 self.activity.insert(ep.0.clone(), now);
             }
+            let t_ns = self.host_ns();
+            self.clock.push(&event.packet, t_ns);
             self.hang.push(&event.packet);
             self.live.push(&event.packet);
             let _ = self.nrpn.push(&event.packet);
             self.mpe.push(&event.packet);
             self.librarian.on_packet(&event.packet);
+            if let Some((from, to)) = self.learn
+                && event.port == from
+                && let Some(mut map) = self.router.map(from, to).cloned()
+                && let Some(label) = map.learn_insert(&event.packet)
+            {
+                self.router.set_map(from, to, map);
+                self.learn = None;
+                self.status = format!("Learned {label} — edit the action to remap");
+            }
             let processed = self.script.process(event);
             for event in &processed {
                 if self.mute_clock {
@@ -246,7 +284,18 @@ impl MidiForgeApp {
                         continue;
                     }
                 }
-                for routed in self.router.route(event) {
+                let routed_list = self.router.route(event);
+                let dests: Vec<PortId> = routed_list.iter().map(|r| r.port).collect();
+                let kind = message_kind(&event.packet);
+                if kind != MessageKind::Clock && kind != MessageKind::ActiveSensing {
+                    self.routes.push(RouteEvent {
+                        time: event.time,
+                        from: event.port,
+                        dests,
+                        packet: event.packet,
+                    });
+                }
+                for routed in routed_list {
                     let Some(dest) = self.endpoint_by_port.get(&routed.port).cloned() else {
                         continue;
                     };
@@ -319,6 +368,59 @@ impl MidiForgeApp {
         self.live = LiveView::new();
         self.mpe.clear_voices();
         self.status = format!("Panic: sent {sent} short messages to open outputs");
+    }
+
+    pub(crate) fn snapshot_text(&self) -> String {
+        let mut s = String::from("Midi-Forge snapshot\n");
+        s.push_str(&format!("backend: {}\n", self.backend_name));
+        s.push_str(&self.wms_note);
+        s.push('\n');
+        s.push_str(&self.clock.summary());
+        s.push('\n');
+        s.push_str(&self.live.dump());
+        if self.hang.is_empty() {
+            s.push_str("Stuck notes: none\n");
+        } else {
+            s.push_str("Stuck notes:\n");
+            for n in self.hang.notes() {
+                s.push_str(&format!("  Ch{} note {}\n", n.channel + 1, n.note));
+            }
+        }
+        if let Some(p) = self.nrpn.last() {
+            s.push_str(&p.summary());
+            s.push('\n');
+        }
+        s.push_str("Thru path (recent):\n");
+        if self.routes.is_empty() {
+            s.push_str("  (none)\n");
+        } else {
+            for ev in self.routes.iter().rev().take(16) {
+                let from = self
+                    .port_names
+                    .get(&ev.from)
+                    .cloned()
+                    .unwrap_or_else(|| format!("p{}", ev.from.0));
+                let dests = if ev.dests.is_empty() {
+                    "dropped".into()
+                } else {
+                    ev.dests
+                        .iter()
+                        .map(|p| {
+                            self.port_names
+                                .get(p)
+                                .cloned()
+                                .unwrap_or_else(|| format!("p{}", p.0))
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                s.push_str(&format!(
+                    "  {from} → {dests}  {}\n",
+                    decode(&ev.packet).summary()
+                ));
+            }
+        }
+        s
     }
 
     pub(crate) fn sync_endpoints(&mut self) {
@@ -538,13 +640,36 @@ impl eframe::App for MidiForgeApp {
                     self.log.clear();
                 }
                 if ui
-                    .button(
-                        egui::RichText::new("Panic").color(egui::Color32::from_rgb(220, 80, 80)),
+                    .add_sized(
+                        [76.0, 24.0],
+                        egui::Button::new(
+                            egui::RichText::new("PANIC")
+                                .strong()
+                                .color(egui::Color32::from_rgb(220, 80, 80)),
+                        ),
                     )
                     .on_hover_text("All Sound Off, Reset CC, All Notes Off on every channel")
                     .clicked()
                 {
                     self.panic_now();
+                }
+                if ui.button("Snap").clicked() {
+                    let text = self.snapshot_text();
+                    ui.ctx().copy_text(text);
+                    self.status = "Snapshot copied".into();
+                }
+                if ui
+                    .checkbox(&mut self.always_on_top, "On top")
+                    .on_hover_text("Keep Midi-Forge above other windows (live / theatre)")
+                    .changed()
+                {
+                    let level = if self.always_on_top {
+                        egui::viewport::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::viewport::WindowLevel::Normal
+                    };
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
                 }
                 ui.checkbox(&mut self.mute_clock, "Mute clock")
                     .on_hover_text("Drop MIDI clock and active sensing on thru. Monitor still shows them.");
@@ -674,6 +799,10 @@ impl eframe::App for MidiForgeApp {
 
         egui::CentralPanel::default().show(ui, |ui| {
             live::live_panel(ui, self);
+            ui.separator();
+            clock::clock_panel(ui, self);
+            ui.separator();
+            clock::route_panel(ui, self);
             ui.separator();
             mpe::mpe_panel(ui, self);
             stuck_notes_panel(ui, self);

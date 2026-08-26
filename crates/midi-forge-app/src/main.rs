@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod clock;
 mod inject;
 mod live;
 mod mpe;

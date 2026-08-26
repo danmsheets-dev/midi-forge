@@ -55,6 +55,14 @@ pub enum Decoded {
     Continue {
         group: u8,
     },
+    SongPosition {
+        group: u8,
+        beats: u16,
+    },
+    MtcQuarter {
+        group: u8,
+        data: u8,
+    },
     Sysex7 {
         group: u8,
         status: u8,
@@ -154,6 +162,8 @@ impl Decoded {
             Self::Start { .. } => "Start".to_string(),
             Self::Stop { .. } => "Stop".to_string(),
             Self::Continue { .. } => "Continue".to_string(),
+            Self::SongPosition { beats, .. } => format!("SongPos {beats}"),
+            Self::MtcQuarter { data, .. } => format!("MTC QF {data:02X}"),
             Self::Sysex7 { count, .. } => format!("SysEx7 {count} bytes"),
             Self::Midi2NoteOn {
                 channel,
@@ -228,6 +238,8 @@ impl Decoded {
             Self::Start { .. } => "start",
             Self::Stop { .. } => "stop",
             Self::Continue { .. } => "continue",
+            Self::SongPosition { .. } => "song_position",
+            Self::MtcQuarter { .. } => "mtc",
             Self::Sysex7 { .. } => "sysex",
             Self::Midi2NoteOn { .. } => "m2_note_on",
             Self::Midi2NoteOff { .. } => "m2_note_off",
@@ -244,7 +256,7 @@ impl Decoded {
 pub fn decode(msg: &UmpMessage) -> Decoded {
     let group = msg.group();
     match msg.message_type() {
-        0x1 => decode_system(group, msg.status_byte()),
+        0x1 => decode_system(msg),
         0x2 => decode_midi1_channel(group, msg.words()[0]),
         0x3 => decode_sysex7(group, msg),
         0x4 => decode_midi2_channel(msg),
@@ -256,12 +268,21 @@ pub fn decode(msg: &UmpMessage) -> Decoded {
     }
 }
 
-fn decode_system(group: u8, status: u8) -> Decoded {
-    match status {
+fn decode_system(msg: &UmpMessage) -> Decoded {
+    let group = msg.group();
+    match msg.status_byte() {
         0xF8 => Decoded::Clock { group },
         0xFA => Decoded::Start { group },
         0xFB => Decoded::Continue { group },
         0xFC => Decoded::Stop { group },
+        0xF1 => Decoded::MtcQuarter {
+            group,
+            data: msg.data1(),
+        },
+        0xF2 => Decoded::SongPosition {
+            group,
+            beats: u16::from(msg.data1() & 0x7F) | (u16::from(msg.data2() & 0x7F) << 7),
+        },
         other => Decoded::Other {
             message_type: 0x1,
             group,
@@ -428,6 +449,14 @@ mod tests {
     fn decodes_clock() {
         let msg = UmpMessage::midi1_system(0, 0xF8, 0, 0);
         assert_eq!(decode(&msg), Decoded::Clock { group: 0 });
+    }
+
+    #[test]
+    fn decodes_spp_and_mtc() {
+        let spp = UmpMessage::midi1_system(0, 0xF2, 0x10, 0x00);
+        assert_eq!(decode(&spp).summary(), "SongPos 16");
+        let mtc = UmpMessage::midi1_system(0, 0xF1, 0x21, 0);
+        assert!(decode(&mtc).summary().contains("MTC"));
     }
 
     #[test]
