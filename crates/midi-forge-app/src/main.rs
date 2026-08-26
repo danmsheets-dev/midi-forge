@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod app;
 mod mpe;
 mod script;
@@ -8,6 +10,7 @@ use midi_forge_io::{Direction, MidiBackend, default_backend};
 
 fn main() -> eframe::Result<()> {
     if std::env::args().any(|a| a == "--list") {
+        attach_parent_console();
         list_ports();
         return Ok(());
     }
@@ -54,5 +57,55 @@ fn list_ports() {
             eprintln!("failed to enumerate MIDI endpoints: {err}");
             std::process::exit(1);
         }
+    }
+}
+
+/// GUI subsystem binaries have no console. Attach the parent terminal for `--list`.
+fn attach_parent_console() {
+    #[cfg(windows)]
+    unsafe {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn AttachConsole(dw_process_id: u32) -> i32;
+        }
+
+        #[repr(C)]
+        struct CFile {
+            _private: [u8; 0],
+        }
+
+        unsafe extern "C" {
+            fn __acrt_iob_func(index: u32) -> *mut CFile;
+            fn freopen_s(
+                stream: *mut *mut CFile,
+                filename: *const u8,
+                mode: *const u8,
+                old: *mut CFile,
+            ) -> i32;
+        }
+
+        const ATTACH_PARENT_PROCESS: u32 = u32::MAX;
+        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
+            return;
+        }
+        let mut unused = std::ptr::null_mut();
+        let _ = freopen_s(
+            &mut unused,
+            c"CONOUT$".as_ptr().cast(),
+            c"w".as_ptr().cast(),
+            __acrt_iob_func(1),
+        );
+        let _ = freopen_s(
+            &mut unused,
+            c"CONOUT$".as_ptr().cast(),
+            c"w".as_ptr().cast(),
+            __acrt_iob_func(2),
+        );
+        let _ = freopen_s(
+            &mut unused,
+            c"CONIN$".as_ptr().cast(),
+            c"r".as_ptr().cast(),
+            __acrt_iob_func(0),
+        );
     }
 }
