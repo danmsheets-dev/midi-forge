@@ -4,6 +4,7 @@ use midi_forge_core::{MidiEvent, PortId, UmpMessage};
 
 use crate::backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint};
 use crate::error::IoError;
+use crate::loopback::SoftwareLoopbacks;
 
 /// In-memory backend for tests. Never touches the OS.
 pub struct NullBackend {
@@ -14,6 +15,8 @@ pub struct NullBackend {
     sent: Vec<(String, UmpMessage)>,
     sent_sysex: Vec<(String, Vec<u8>)>,
     dropped: u64,
+    loopbacks: SoftwareLoopbacks,
+    base: Vec<Endpoint>,
 }
 
 impl NullBackend {
@@ -26,32 +29,43 @@ impl NullBackend {
             sent: Vec::new(),
             sent_sysex: Vec::new(),
             dropped: 0,
+            loopbacks: SoftwareLoopbacks::new(),
+            base: Vec::new(),
         }
     }
 
     pub fn with_fixture_ports() -> Self {
+        let base = vec![
+            Endpoint {
+                id: EndpointId("null:in:0".into()),
+                name: "Null Keyboard".into(),
+                direction: Direction::Input,
+                protocol: ProtocolHint::Midi1Bytes,
+            },
+            Endpoint {
+                id: EndpointId("null:out:0".into()),
+                name: "Null Synth".into(),
+                direction: Direction::Output,
+                protocol: ProtocolHint::Midi1Bytes,
+            },
+        ];
         Self {
-            endpoints: vec![
-                Endpoint {
-                    id: EndpointId("null:in:0".into()),
-                    name: "Null Keyboard".into(),
-                    direction: Direction::Input,
-                    protocol: ProtocolHint::Midi1Bytes,
-                },
-                Endpoint {
-                    id: EndpointId("null:out:0".into()),
-                    name: "Null Synth".into(),
-                    direction: Direction::Output,
-                    protocol: ProtocolHint::Midi1Bytes,
-                },
-            ],
+            endpoints: base.clone(),
             open_inputs: HashSet::new(),
             open_outputs: HashSet::new(),
             pending: Vec::new(),
             sent: Vec::new(),
             sent_sysex: Vec::new(),
             dropped: 0,
+            loopbacks: SoftwareLoopbacks::new(),
+            base,
         }
+    }
+
+    fn sync_endpoints(&mut self) {
+        let mut endpoints = self.base.clone();
+        endpoints.extend(self.loopbacks.endpoints());
+        self.endpoints = endpoints;
     }
 
     pub fn inject(&mut self, event: MidiEvent) {
@@ -73,6 +87,7 @@ impl MidiBackend for NullBackend {
     }
 
     fn refresh(&mut self) -> Result<(), IoError> {
+        self.sync_endpoints();
         Ok(())
     }
 
@@ -80,7 +95,10 @@ impl MidiBackend for NullBackend {
         &self.endpoints
     }
 
-    fn open_input(&mut self, id: &EndpointId, _port: PortId) -> Result<(), IoError> {
+    fn open_input(&mut self, id: &EndpointId, port: PortId) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.open_input(id, port);
+        }
         self.require(id, Direction::Input)?;
         if !self.open_inputs.insert(id.0.clone()) {
             return Err(IoError::AlreadyOpen(id.0.clone()));
@@ -89,11 +107,17 @@ impl MidiBackend for NullBackend {
     }
 
     fn close_input(&mut self, id: &EndpointId) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.close_input(id);
+        }
         self.open_inputs.remove(&id.0);
         Ok(())
     }
 
     fn open_output(&mut self, id: &EndpointId, _port: PortId) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.open_output(id);
+        }
         self.require(id, Direction::Output)?;
         if !self.open_outputs.insert(id.0.clone()) {
             return Err(IoError::AlreadyOpen(id.0.clone()));
@@ -102,16 +126,23 @@ impl MidiBackend for NullBackend {
     }
 
     fn close_output(&mut self, id: &EndpointId) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.close_output(id);
+        }
         self.open_outputs.remove(&id.0);
         Ok(())
     }
 
     fn poll(&mut self, out: &mut Vec<MidiEvent>) -> u64 {
         out.append(&mut self.pending);
+        self.loopbacks.poll(out);
         self.dropped
     }
 
     fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.send(id, *packet);
+        }
         if !self.open_outputs.contains(&id.0) {
             return Err(IoError::NotFound(id.0.clone()));
         }
@@ -120,13 +151,28 @@ impl MidiBackend for NullBackend {
     }
 
     fn send_sysex(&mut self, id: &EndpointId, bytes: &[u8]) -> Result<(), IoError> {
-        if !self.open_outputs.contains(&id.0) {
-            return Err(IoError::NotFound(id.0.clone()));
-        }
         if bytes.first() != Some(&0xF0) || bytes.last() != Some(&0xF7) {
             return Err(IoError::UnsupportedPacket);
         }
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.send_sysex(id, bytes);
+        }
+        if !self.open_outputs.contains(&id.0) {
+            return Err(IoError::NotFound(id.0.clone()));
+        }
         self.sent_sysex.push((id.0.clone(), bytes.to_vec()));
+        Ok(())
+    }
+
+    fn create_loopback(&mut self, name: &str) -> Result<(EndpointId, EndpointId), IoError> {
+        let pair = self.loopbacks.create(name);
+        self.sync_endpoints();
+        Ok(pair)
+    }
+
+    fn remove_loopback(&mut self, id: &EndpointId) -> Result<(), IoError> {
+        self.loopbacks.remove(id)?;
+        self.sync_endpoints();
         Ok(())
     }
 }
@@ -210,5 +256,20 @@ mod tests {
             .unwrap();
         assert_eq!(backend.sent_sysex().len(), 1);
         assert_eq!(backend.sent_sysex()[0].1, midi_forge_core::IDENTITY_REQUEST);
+    }
+
+    #[test]
+    fn loopback_create_send_poll() {
+        let mut backend = NullBackend::empty();
+        let (inp, outp) = backend.create_loopback("Unit").unwrap();
+        backend.open_input(&inp, PortId(3)).unwrap();
+        backend.open_output(&outp, PortId(4)).unwrap();
+        let note = ump_from_packed_short(0x90 | (60 << 8) | (100 << 16));
+        backend.send(&outp, &note).unwrap();
+        let mut out = Vec::new();
+        backend.poll(&mut out);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].port, PortId(3));
+        assert_eq!(out[0].packet, note);
     }
 }

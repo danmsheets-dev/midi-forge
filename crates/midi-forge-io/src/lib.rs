@@ -3,6 +3,7 @@
 
 mod backend;
 mod error;
+mod loopback;
 mod null;
 
 #[cfg(windows)]

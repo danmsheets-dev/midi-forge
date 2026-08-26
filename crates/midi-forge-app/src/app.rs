@@ -3,16 +3,17 @@ use std::time::Duration;
 
 use eframe::egui;
 use midi_forge_core::{
-    MidiEvent, MonitorLog, PortId, Profile, ProfileLink, Router, SysexAssembler, decode,
-    format_wire_hex, panic_packets,
+    MidiEvent, MonitorLog, MpeTracker, PortId, Profile, ProfileLink, Router, SysexAssembler,
+    decode, format_wire_hex, panic_packets,
 };
 use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, default_backend};
 
+use crate::mpe;
 use crate::sysex::{self, Librarian};
 use crate::thru;
 
 pub struct MidiForgeApp {
-    backend: Box<dyn MidiBackend>,
+    pub(crate) backend: Box<dyn MidiBackend>,
     backend_name: String,
     pub(crate) endpoints: Vec<Endpoint>,
     log: MonitorLog,
@@ -21,7 +22,7 @@ pub struct MidiForgeApp {
     follow: bool,
     dropped: u64,
     open_inputs: HashSet<String>,
-    open_outputs: HashSet<String>,
+    pub(crate) open_outputs: HashSet<String>,
     pub(crate) port_names: HashMap<PortId, String>,
     port_by_endpoint: HashMap<String, PortId>,
     endpoint_by_port: HashMap<PortId, EndpointId>,
@@ -32,6 +33,9 @@ pub struct MidiForgeApp {
     pub(crate) status: String,
     pub(crate) librarian: Librarian,
     thru_sysex: HashMap<String, SysexAssembler>,
+    pub(crate) mpe: MpeTracker,
+    pub(crate) mpe_members: u8,
+    pub(crate) cable_name: String,
 }
 
 impl MidiForgeApp {
@@ -64,6 +68,9 @@ impl MidiForgeApp {
             status,
             librarian: Librarian::new(),
             thru_sysex: HashMap::new(),
+            mpe: MpeTracker::new(),
+            mpe_members: 15,
+            cable_name: "Forge Cable".into(),
         };
 
         let inputs: Vec<EndpointId> = app
@@ -98,7 +105,7 @@ impl MidiForgeApp {
         port
     }
 
-    fn set_input_open(&mut self, id: &EndpointId, open: bool) -> Result<(), String> {
+    pub(crate) fn set_input_open(&mut self, id: &EndpointId, open: bool) -> Result<(), String> {
         let port = self.ensure_port(id);
         if open {
             if self.open_inputs.contains(&id.0) {
@@ -163,6 +170,7 @@ impl MidiForgeApp {
             }
         }
         for event in &events {
+            self.mpe.push(&event.packet);
             self.librarian.on_packet(&event.packet);
             for routed in self.router.route(event) {
                 let Some(dest) = self.endpoint_by_port.get(&routed.port).cloned() else {
@@ -218,7 +226,20 @@ impl MidiForgeApp {
                 }
             }
         }
+        self.mpe.clear_voices();
         self.status = format!("Panic: sent {sent} short messages to open outputs");
+    }
+
+    pub(crate) fn sync_endpoints(&mut self) {
+        self.endpoints = self.backend.endpoints().to_vec();
+    }
+
+    pub(crate) fn send_packet(
+        &mut self,
+        id: &EndpointId,
+        packet: &midi_forge_core::UmpMessage,
+    ) -> Result<(), String> {
+        self.backend.send(id, packet).map_err(|e| e.to_string())
     }
 
     fn to_profile(&self) -> Profile {
@@ -315,7 +336,7 @@ impl eframe::App for MidiForgeApp {
             ui.horizontal(|ui| {
                 ui.heading("Midi-Forge");
                 ui.separator();
-                ui.label("Phase 4 — SysEx librarian");
+                ui.label("Phase 5 — MPE + virtual cables");
                 ui.separator();
                 if ui.button("Save").clicked() {
                     self.save_profile_dialog();
@@ -404,6 +425,7 @@ impl eframe::App for MidiForgeApp {
                         });
                     }
                 });
+                mpe::virtual_cables_ui(ui, self);
             });
 
         egui::Panel::right("sysex")
@@ -421,6 +443,8 @@ impl eframe::App for MidiForgeApp {
             });
 
         egui::CentralPanel::default().show(ui, |ui| {
+            mpe::mpe_panel(ui, self);
+            ui.separator();
             ui.horizontal(|ui| {
                 ui.heading("Monitor");
                 if self.paused {

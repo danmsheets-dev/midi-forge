@@ -2,7 +2,7 @@
 
 Modern 64-bit MIDI diagnostic and routing utility (MIDI-OX successor). Rust engine, native Windows/macOS desktop first.
 
-Phase 4 adds a SysEx librarian: identity request, armed receive, `.syx` load/save, hex editor, Roland checksum, and delay-after-F7 send.
+Phase 5 adds an MPE zone/voice inspector (RPN 6 MCM) and app-local virtual cables (`forge:loop:*`). DAW-visible ports are whatever WinMM already lists (loopMIDI, MIDI Services).
 
 ## Build
 
@@ -21,6 +21,8 @@ Thru: tick a cell in the bottom matrix (for example MPK mini play → Microsoft 
 Uncheck **Clock** to strip MIDI clock. Pause freezes the log but does not stop thru.
 
 SysEx: arm receive on the right panel, or send **Identity request** to the selected output. **Delay after F7** (default 60 ms) spaces dumps when sending a `.syx` file.
+
+MPE: the monitor shows zones (RPN 6) and live notes with bend/pressure/timbre (CC74). **Add cable** creates an in-app loopback you can thru through; it is not visible to other programs. loopMIDI / MIDI Services ports still appear in the endpoint list.
 
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 

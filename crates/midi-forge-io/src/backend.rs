@@ -42,6 +42,9 @@ pub trait MidiBackend {
     fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError>;
     /// Send a complete SysEx dump (`F0…F7`) as a long message.
     fn send_sysex(&mut self, id: &EndpointId, bytes: &[u8]) -> Result<(), IoError>;
+    /// App-local virtual cable pair (in, out). Other processes do not see these.
+    fn create_loopback(&mut self, name: &str) -> Result<(EndpointId, EndpointId), IoError>;
+    fn remove_loopback(&mut self, id: &EndpointId) -> Result<(), IoError>;
 }
 
 pub fn default_backend() -> Box<dyn MidiBackend> {

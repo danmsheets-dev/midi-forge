@@ -14,6 +14,7 @@ use midi_forge_core::{
 
 use crate::backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint};
 use crate::error::IoError;
+use crate::loopback::SoftwareLoopbacks;
 
 const MAXPNAMELEN: usize = 32;
 const MMSYSERR_NOERROR: u32 = 0;
@@ -162,6 +163,7 @@ pub struct WinMmBackend {
     rx: Receiver<CaptureFrame>,
     dropped: Arc<AtomicU64>,
     parsers: HashMap<PortId, Midi1Parser>,
+    loopbacks: SoftwareLoopbacks,
 }
 
 impl WinMmBackend {
@@ -175,6 +177,7 @@ impl WinMmBackend {
             rx,
             dropped: Arc::new(AtomicU64::new(0)),
             parsers: HashMap::new(),
+            loopbacks: SoftwareLoopbacks::new(),
         };
         let _ = this.refresh();
         this
@@ -206,8 +209,7 @@ impl MidiBackend for WinMmBackend {
     }
 
     fn refresh(&mut self) -> Result<(), IoError> {
-        self.endpoints = enumerate()?;
-        Ok(())
+        self.rebuild_endpoints()
     }
 
     fn endpoints(&self) -> &[Endpoint] {
@@ -215,6 +217,9 @@ impl MidiBackend for WinMmBackend {
     }
 
     fn open_input(&mut self, id: &EndpointId, port: PortId) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.open_input(id, port);
+        }
         if self.inputs.contains_key(&id.0) {
             return Err(IoError::AlreadyOpen(id.0.clone()));
         }
@@ -280,6 +285,9 @@ impl MidiBackend for WinMmBackend {
     }
 
     fn close_input(&mut self, id: &EndpointId) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.close_input(id);
+        }
         let Some(mut input) = self.inputs.remove(&id.0) else {
             return Ok(());
         };
@@ -297,6 +305,9 @@ impl MidiBackend for WinMmBackend {
     }
 
     fn open_output(&mut self, id: &EndpointId, _port: PortId) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.open_output(id);
+        }
         if self.outputs.contains_key(&id.0) {
             return Err(IoError::AlreadyOpen(id.0.clone()));
         }
@@ -311,6 +322,9 @@ impl MidiBackend for WinMmBackend {
     }
 
     fn close_output(&mut self, id: &EndpointId) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.close_output(id);
+        }
         if let Some(output) = self.outputs.remove(&id.0) {
             unsafe {
                 midiOutClose(output.handle);
@@ -339,10 +353,14 @@ impl MidiBackend for WinMmBackend {
                 }
             }
         }
+        self.loopbacks.poll(out);
         self.dropped.load(Ordering::Relaxed)
     }
 
     fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.send(id, *packet);
+        }
         let Some(output) = self.outputs.get(&id.0) else {
             return Err(IoError::NotFound(id.0.clone()));
         };
@@ -355,6 +373,9 @@ impl MidiBackend for WinMmBackend {
     }
 
     fn send_sysex(&mut self, id: &EndpointId, bytes: &[u8]) -> Result<(), IoError> {
+        if self.loopbacks.is_ours(id) {
+            return self.loopbacks.send_sysex(id, bytes);
+        }
         let Some(output) = self.outputs.get(&id.0) else {
             return Err(IoError::NotFound(id.0.clone()));
         };
@@ -362,6 +383,26 @@ impl MidiBackend for WinMmBackend {
             return Err(IoError::UnsupportedPacket);
         }
         send_long_message(output.handle, bytes)
+    }
+
+    fn create_loopback(&mut self, name: &str) -> Result<(EndpointId, EndpointId), IoError> {
+        let pair = self.loopbacks.create(name);
+        self.rebuild_endpoints()?;
+        Ok(pair)
+    }
+
+    fn remove_loopback(&mut self, id: &EndpointId) -> Result<(), IoError> {
+        self.loopbacks.remove(id)?;
+        self.rebuild_endpoints()
+    }
+}
+
+impl WinMmBackend {
+    fn rebuild_endpoints(&mut self) -> Result<(), IoError> {
+        let mut endpoints = enumerate()?;
+        endpoints.extend(self.loopbacks.endpoints());
+        self.endpoints = endpoints;
+        Ok(())
     }
 }
 
