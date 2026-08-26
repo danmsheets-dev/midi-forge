@@ -50,6 +50,10 @@ impl MonitorLog {
     pub fn get(&self, index: usize) -> Option<&MidiEvent> {
         self.events.get(index)
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &MidiEvent> {
+        self.events.iter()
+    }
 }
 
 impl Default for MonitorLog {

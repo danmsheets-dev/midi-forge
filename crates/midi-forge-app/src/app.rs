@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use midi_forge_core::{
-    MidiEvent, MonitorLog, MpeTracker, PortId, Profile, ProfileLink, Router, SysexAssembler,
-    decode, format_wire_hex, panic_packets,
+    HangTracker, MessageKind, MidiEvent, MonitorLog, MpeTracker, PortId, Profile, ProfileLink,
+    Router, SysexAssembler, decode, format_wire_hex, message_kind, panic_packets,
 };
 use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, default_backend};
 
+use crate::inject;
 use crate::mpe;
 use crate::script::{self, RightTab};
 use crate::sysex::{self, Librarian};
@@ -39,6 +40,25 @@ pub struct MidiForgeApp {
     pub(crate) cable_name: String,
     pub(crate) script: midi_forge_script::ScriptEngine,
     pub(crate) right_tab: RightTab,
+    pub(crate) hang: HangTracker,
+    pub(crate) mute_clock: bool,
+    pub(crate) inject_channel: u8,
+    pub(crate) inject_octave: i8,
+    pub(crate) inject_velocity: u8,
+    pub(crate) inject_cc: u8,
+    pub(crate) inject_cc_val: u8,
+    pub(crate) inject_dest: Option<String>,
+    pub(crate) held_keys: HashSet<u8>,
+    pub(crate) mon_search: String,
+    pub(crate) mon_notes: bool,
+    pub(crate) mon_cc: bool,
+    pub(crate) mon_clock: bool,
+    pub(crate) mon_sysex: bool,
+    pub(crate) mon_other: bool,
+    pub(crate) mon_channel: u8,
+    activity: HashMap<String, Instant>,
+    last_hotplug: Instant,
+    device_fp: String,
 }
 
 impl MidiForgeApp {
@@ -76,6 +96,25 @@ impl MidiForgeApp {
             cable_name: "Forge Cable".into(),
             script: midi_forge_script::ScriptEngine::new(),
             right_tab: RightTab::Sysex,
+            hang: HangTracker::new(),
+            mute_clock: false,
+            inject_channel: 1,
+            inject_octave: 0,
+            inject_velocity: 100,
+            inject_cc: 1,
+            inject_cc_val: 0,
+            inject_dest: None,
+            held_keys: HashSet::new(),
+            mon_search: String::new(),
+            mon_notes: true,
+            mon_cc: true,
+            mon_clock: true,
+            mon_sysex: true,
+            mon_other: true,
+            mon_channel: 0,
+            activity: HashMap::new(),
+            last_hotplug: Instant::now(),
+            device_fp: String::new(),
         };
 
         let inputs: Vec<EndpointId> = app
@@ -89,6 +128,7 @@ impl MidiForgeApp {
                 app.port_errors.insert(id.0, err);
             }
         }
+        app.device_fp = device_fingerprint(&app.endpoints);
         app
     }
 
@@ -174,11 +214,22 @@ impl MidiForgeApp {
                 self.log.push(*event);
             }
         }
+        let now = Instant::now();
         for event in &events {
+            if let Some(ep) = self.endpoint_by_port.get(&event.port) {
+                self.activity.insert(ep.0.clone(), now);
+            }
+            self.hang.push(&event.packet);
             self.mpe.push(&event.packet);
             self.librarian.on_packet(&event.packet);
             let processed = self.script.process(event);
             for event in &processed {
+                if self.mute_clock {
+                    let kind = message_kind(&event.packet);
+                    if kind == MessageKind::Clock || kind == MessageKind::ActiveSensing {
+                        continue;
+                    }
+                }
                 for routed in self.router.route(event) {
                     let Some(dest) = self.endpoint_by_port.get(&routed.port).cloned() else {
                         continue;
@@ -223,7 +274,7 @@ impl MidiForgeApp {
         let packets = panic_packets();
         let mut sent = 0usize;
         let ids: Vec<String> = self.open_outputs.iter().cloned().collect();
-        for id in ids {
+        for id in &ids {
             for packet in &packets {
                 match self.backend.send(&EndpointId(id.clone()), packet) {
                     Ok(()) => sent += 1,
@@ -234,6 +285,15 @@ impl MidiForgeApp {
                 }
             }
         }
+        let hanging = self.hang.note_off_packets();
+        for id in &ids {
+            for packet in &hanging {
+                if self.backend.send(&EndpointId(id.clone()), packet).is_ok() {
+                    sent += 1;
+                }
+            }
+        }
+        self.hang.clear();
         self.mpe.clear_voices();
         self.status = format!("Panic: sent {sent} short messages to open outputs");
     }
@@ -278,6 +338,25 @@ impl MidiForgeApp {
         if self.status.is_empty() {
             self.status = format!("{} endpoint(s)", self.endpoints.len());
         }
+        self.device_fp = device_fingerprint(&self.endpoints);
+    }
+
+    fn poll_hotplug(&mut self) {
+        if self.last_hotplug.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.last_hotplug = Instant::now();
+        let before = self.device_fp.clone();
+        if self.backend.refresh().is_err() {
+            return;
+        }
+        self.sync_endpoints();
+        let after = device_fingerprint(&self.endpoints);
+        if after == before {
+            return;
+        }
+        self.refresh_devices();
+        self.status = "MIDI devices changed — rescanned".into();
     }
 
     pub(crate) fn send_packet(
@@ -377,10 +456,9 @@ impl MidiForgeApp {
 impl eframe::App for MidiForgeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_capture();
+        self.poll_hotplug();
         sysex::tick_send(self, ui.ctx());
-        if !self.open_inputs.is_empty() || self.librarian.sending() {
-            ui.ctx().request_repaint_after(Duration::from_millis(16));
-        }
+        ui.ctx().request_repaint_after(Duration::from_millis(16));
 
         egui::Panel::top("banner").show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -413,6 +491,8 @@ impl eframe::App for MidiForgeApp {
                 {
                     self.panic_now();
                 }
+                ui.checkbox(&mut self.mute_clock, "Mute clock")
+                    .on_hover_text("Drop MIDI clock and active sensing on thru. Monitor still shows them.");
                 ui.checkbox(&mut self.follow, "Follow");
                 ui.separator();
                 ui.label(format!("{} events", self.log.len()));
@@ -486,6 +566,7 @@ impl eframe::App for MidiForgeApp {
                                 }
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
+                                        activity_dot(ui, self.activity.get(&ep.id.0));
                                         ui.strong(&ep.name);
                                         ui.weak(ep.protocol.label());
                                     });
@@ -536,6 +617,9 @@ impl eframe::App for MidiForgeApp {
 
         egui::CentralPanel::default().show(ui, |ui| {
             mpe::mpe_panel(ui, self);
+            stuck_notes_panel(ui, self);
+            ui.separator();
+            inject::inject_panel(ui, self);
             ui.separator();
             ui.horizontal(|ui| {
                 ui.heading("Monitor");
@@ -546,16 +630,20 @@ impl eframe::App for MidiForgeApp {
                     );
                 }
             });
+            monitor_toolbar(ui, self);
             ui.separator();
             header_row(ui);
+            let visible = visible_log_indices(self);
             let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
-            let n = self.log.len();
+            let n = visible.len();
             egui::ScrollArea::vertical()
                 .stick_to_bottom(self.follow)
                 .auto_shrink([false, false])
                 .show_rows(ui, row_height, n, |ui, range| {
-                    for i in range {
-                        if let Some(event) = self.log.get(i) {
+                    for row in range {
+                        if let Some(&i) = visible.get(row)
+                            && let Some(event) = self.log.get(i)
+                        {
                             event_row(ui, event, &self.port_names);
                         }
                     }
@@ -603,5 +691,156 @@ fn direction_label(dir: Direction) -> &'static str {
         Direction::Input => "Input",
         Direction::Output => "Output",
         Direction::Bidirectional => "Bidirectional",
+    }
+}
+
+fn device_fingerprint(endpoints: &[Endpoint]) -> String {
+    let mut parts: Vec<String> = endpoints
+        .iter()
+        .map(|e| format!("{}|{}", e.id.0, e.name))
+        .collect();
+    parts.sort();
+    parts.join(";")
+}
+
+fn activity_dot(ui: &mut egui::Ui, last: Option<&Instant>) {
+    let age = last.map(|t| t.elapsed()).unwrap_or(Duration::from_secs(60));
+    let color = if age < Duration::from_millis(250) {
+        egui::Color32::from_rgb(80, 220, 120)
+    } else if age < Duration::from_secs(2) {
+        egui::Color32::from_rgb(80, 140, 90)
+    } else {
+        egui::Color32::from_rgb(50, 50, 55)
+    };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+    ui.painter()
+        .circle_filled(rect.center(), 3.5, color);
+}
+
+fn stuck_notes_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+    let notes = app.hang.notes();
+    if notes.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 140, 40),
+            format!("{} stuck", notes.len()),
+        );
+        for n in &notes {
+            ui.monospace(format!("Ch{} {}", n.channel + 1, n.note));
+        }
+        if ui.small_button("Off hanging").clicked() {
+            let packets = app.hang.note_off_packets();
+            let dests: Vec<String> = app.open_outputs.iter().cloned().collect();
+            for id in dests {
+                for p in &packets {
+                    let _ = app.backend.send(&EndpointId(id.clone()), p);
+                }
+            }
+            app.hang.clear();
+        }
+    });
+}
+
+fn monitor_toolbar(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+    ui.horizontal_wrapped(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut app.mon_search)
+                .desired_width(140.0)
+                .hint_text("Search"),
+        );
+        ui.checkbox(&mut app.mon_notes, "Notes");
+        ui.checkbox(&mut app.mon_cc, "CC");
+        ui.checkbox(&mut app.mon_clock, "Clock");
+        ui.checkbox(&mut app.mon_sysex, "SysEx");
+        ui.checkbox(&mut app.mon_other, "Other");
+        ui.label("Ch");
+        ui.add(egui::DragValue::new(&mut app.mon_channel).range(0..=16))
+            .on_hover_text("0 = all channels");
+        if ui.button("Copy").clicked() {
+            ui.ctx().copy_text(format_visible_log(app));
+            app.status = "Copied visible log".into();
+        }
+        if ui.button("Export").clicked() {
+            export_visible_log(app);
+        }
+    });
+}
+
+fn event_passes_monitor(app: &MidiForgeApp, event: &MidiEvent) -> bool {
+    let kind = message_kind(&event.packet);
+    let type_ok = match kind {
+        MessageKind::Note => app.mon_notes,
+        MessageKind::ControlChange => app.mon_cc,
+        MessageKind::Clock | MessageKind::ActiveSensing => app.mon_clock,
+        MessageKind::Sysex => app.mon_sysex,
+        _ => app.mon_other,
+    };
+    if !type_ok {
+        return false;
+    }
+    if app.mon_channel > 0 {
+        match event.packet.channel() {
+            Some(ch) if ch + 1 == app.mon_channel => {}
+            Some(_) => return false,
+            None => {}
+        }
+    }
+    if app.mon_search.is_empty() {
+        return true;
+    }
+    let q = app.mon_search.to_lowercase();
+    let hex = format_wire_hex(&event.packet);
+    let decoded = decode(&event.packet).summary();
+    let port = app
+        .port_names
+        .get(&event.port)
+        .cloned()
+        .unwrap_or_default();
+    hex.to_lowercase().contains(&q)
+        || decoded.to_lowercase().contains(&q)
+        || port.to_lowercase().contains(&q)
+}
+
+fn visible_log_indices(app: &MidiForgeApp) -> Vec<usize> {
+    (0..app.log.len())
+        .filter(|&i| app.log.get(i).is_some_and(|e| event_passes_monitor(app, e)))
+        .collect()
+}
+
+fn format_event_line(event: &MidiEvent, names: &HashMap<PortId, String>) -> String {
+    let time = event.time.nanos as f64 / 1_000_000_000.0;
+    let port = names
+        .get(&event.port)
+        .cloned()
+        .unwrap_or_else(|| format!("port {}", event.port.0));
+    format!(
+        "{time:.3}\t{port}\t{}\t{}",
+        format_wire_hex(&event.packet),
+        decode(&event.packet).summary()
+    )
+}
+
+fn format_visible_log(app: &MidiForgeApp) -> String {
+    visible_log_indices(app)
+        .into_iter()
+        .filter_map(|i| app.log.get(i))
+        .map(|e| format_event_line(e, &app.port_names))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn export_visible_log(app: &mut MidiForgeApp) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Text", &["txt", "csv"])
+        .set_file_name("midi-forge-log.txt")
+        .save_file()
+    else {
+        return;
+    };
+    match std::fs::write(&path, format_visible_log(app)) {
+        Ok(()) => app.status = format!("Exported {}", path.display()),
+        Err(err) => app.status = format!("Export failed: {err}"),
     }
 }

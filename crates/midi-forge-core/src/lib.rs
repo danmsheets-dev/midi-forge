@@ -7,6 +7,7 @@ mod decode;
 mod error;
 mod event;
 mod filter;
+mod hang;
 mod log;
 mod map;
 mod midi1;
@@ -22,6 +23,7 @@ pub use decode::{Decoded, decode};
 pub use error::CoreError;
 pub use event::{MidiEvent, PortId, Timestamp};
 pub use filter::{Filter, MessageKind, message_kind};
+pub use hang::{HangNote, HangTracker};
 pub use log::MonitorLog;
 pub use map::{DataMap, MapAction, MapEntry, MatchKind, Matcher, ValueMap, VoiceKind};
 pub use midi1::{

@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod inject;
 mod mpe;
 mod script;
 mod sysex;

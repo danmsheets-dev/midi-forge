@@ -26,6 +26,8 @@ MPE: the monitor shows zones (RPN 6) and live notes with bend/pressure/timbre (C
 
 Lua: the right panel **Lua** tab. **Apply** compiles, **Enable** runs `on_midi` on capture before thru. `print` / `midi.log` go to the script log. `io` / `os` are not available.
 
+**Inject:** on-screen two-octave keyboard and CC slider send to a chosen output. **Monitor** can filter by type/channel, search, copy, and export. **Mute clock** strips clock on thru only. Green dots on endpoints flash with traffic. Stuck notes list under MPE; Panic also sends note-offs for hanging notes. Devices rescanning every 2s when the list changes.
+
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 
 ## Crates
