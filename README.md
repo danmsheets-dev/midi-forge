@@ -28,6 +28,8 @@ Lua: the right panel **Lua** tab. **Apply** compiles, **Enable** runs `on_midi` 
 
 **Inject:** on-screen two-octave keyboard and CC slider send to a chosen output. **Monitor** can filter by type/channel, search, copy, and export. **Mute clock** strips clock on thru only. Green dots on endpoints flash with traffic. Stuck notes list under MPE; Panic also sends note-offs for hanging notes. Devices rescanning every 2s when the list changes.
 
+**Live** is a ShowMIDI-style “now” view (notes sounding, last CC, bend per channel) above the monitor. Named CCs appear in the log (`CC7 (Volume)`); RPN/NRPN assemble from CC 98–101. **MIDI-CI** next to Identity sends a Discovery inquiry. Endpoints show whether MidiSrv / `midi.exe` are present — native UMP `MidiSession` still needs the Windows MIDI Services App SDK.
+
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 
 ## Crates

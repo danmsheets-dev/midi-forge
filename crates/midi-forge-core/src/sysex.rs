@@ -1,4 +1,3 @@
-use crate::mfr::manufacturer_name;
 use crate::ump::UmpMessage;
 
 /// Universal identity request (non-realtime, all devices).
@@ -234,16 +233,7 @@ pub struct IdentityReply {
 
 impl IdentityReply {
     pub fn manufacturer_label(&self) -> String {
-        manufacturer_name(&self.manufacturer).map_or_else(
-            || {
-                self.manufacturer
-                    .iter()
-                    .map(|b| format!("{b:02X}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            },
-            |n| n.to_string(),
-        )
+        crate::mfr::manufacturer_label(&self.manufacturer)
     }
 
     pub fn summary(&self) -> String {
@@ -267,7 +257,11 @@ impl IdentityReply {
             .manufacturer_label()
             .to_lowercase()
             .replace([' ', '/'], "-");
-        format!("{mfr}-{family:04x}-{member:04x}", family = self.family, member = self.member)
+        format!(
+            "{mfr}-{family:04x}-{member:04x}",
+            family = self.family,
+            member = self.member
+        )
     }
 }
 

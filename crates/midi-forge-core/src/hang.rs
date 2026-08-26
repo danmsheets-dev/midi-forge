@@ -113,7 +113,13 @@ mod tests {
         h.push(&on(0, 64));
         assert_eq!(h.len(), 2);
         h.push(&off(0, 60));
-        assert_eq!(h.notes(), vec![HangNote { channel: 0, note: 64 }]);
+        assert_eq!(
+            h.notes(),
+            vec![HangNote {
+                channel: 0,
+                note: 64
+            }]
+        );
     }
 
     #[test]
@@ -130,7 +136,13 @@ mod tests {
         h.push(&on(2, 1));
         h.push(&on(3, 2));
         h.push(&UmpMessage::midi1_channel_voice(0, 0xB2, 123, 0));
-        assert_eq!(h.notes(), vec![HangNote { channel: 3, note: 2 }]);
+        assert_eq!(
+            h.notes(),
+            vec![HangNote {
+                channel: 3,
+                note: 2
+            }]
+        );
     }
 
     #[test]

@@ -3,12 +3,14 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use midi_forge_core::{
-    HangTracker, MessageKind, MidiEvent, MonitorLog, MpeTracker, PortId, Profile, ProfileLink,
-    Router, SysexAssembler, UmpMessage, decode, format_wire_hex, message_kind, panic_packets,
+    HangTracker, LiveView, MessageKind, MidiEvent, MonitorLog, MpeTracker, NrpnTracker, PortId,
+    Profile, ProfileLink, Router, SysexAssembler, UmpMessage, decode, format_wire_hex,
+    message_kind, panic_packets,
 };
-use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, default_backend};
+use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, default_backend, probe_wms};
 
 use crate::inject;
+use crate::live;
 use crate::mpe;
 use crate::script::{self, RightTab};
 use crate::sysex::{self, Librarian};
@@ -41,6 +43,9 @@ pub struct MidiForgeApp {
     pub(crate) script: midi_forge_script::ScriptEngine,
     pub(crate) right_tab: RightTab,
     pub(crate) hang: HangTracker,
+    pub(crate) live: LiveView,
+    pub(crate) nrpn: NrpnTracker,
+    pub(crate) wms_note: String,
     pub(crate) mute_clock: bool,
     pub(crate) inject_channel: u8,
     pub(crate) inject_octave: i8,
@@ -100,6 +105,9 @@ impl MidiForgeApp {
             script: midi_forge_script::ScriptEngine::new(),
             right_tab: RightTab::Sysex,
             hang: HangTracker::new(),
+            live: LiveView::new(),
+            nrpn: NrpnTracker::new(),
+            wms_note: probe_wms().summary,
             mute_clock: false,
             inject_channel: 1,
             inject_octave: 0,
@@ -226,6 +234,8 @@ impl MidiForgeApp {
                 self.activity.insert(ep.0.clone(), now);
             }
             self.hang.push(&event.packet);
+            self.live.push(&event.packet);
+            let _ = self.nrpn.push(&event.packet);
             self.mpe.push(&event.packet);
             self.librarian.on_packet(&event.packet);
             let processed = self.script.process(event);
@@ -306,6 +316,7 @@ impl MidiForgeApp {
             }
         }
         self.hang.clear();
+        self.live = LiveView::new();
         self.mpe.clear_voices();
         self.status = format!("Panic: sent {sent} short messages to open outputs");
     }
@@ -331,6 +342,7 @@ impl MidiForgeApp {
             Err(err) => self.status = err.to_string(),
         }
         self.backend_name = self.backend.name().to_string();
+        self.wms_note = probe_wms().summary;
         self.sync_endpoints();
         let known: HashSet<String> = self.endpoints.iter().map(|e| e.id.0.clone()).collect();
         for id in open_ins {
@@ -359,10 +371,7 @@ impl MidiForgeApp {
         let now = Instant::now();
         for dest in dests {
             if self.throttle_ms == 0 {
-                while let Some(packet) = self
-                    .throttle_q
-                    .get_mut(&dest)
-                    .and_then(|q| q.pop_front())
+                while let Some(packet) = self.throttle_q.get_mut(&dest).and_then(|q| q.pop_front())
                 {
                     let _ = self.backend.send(&EndpointId(dest.clone()), &packet);
                 }
@@ -565,7 +574,8 @@ impl eframe::App for MidiForgeApp {
                             "Windows MIDI Services is running. WinMM sees MIDI 1 views of UMP devices. Native MidiSession I/O is a later phase.",
                         );
                     }
-                    ui.weak(format!("backend: {}", self.backend_name));
+                    ui.weak(format!("backend: {}", self.backend_name))
+                        .on_hover_text(&self.wms_note);
                 });
             });
             if !self.status.is_empty() {
@@ -587,6 +597,7 @@ impl eframe::App for MidiForgeApp {
                     }
                 });
                 ui.weak("Check an output to open it. Thru cells open both ends.");
+                ui.weak(&self.wms_note);
                 ui.separator();
                 let endpoints = self.endpoints.clone();
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -662,6 +673,8 @@ impl eframe::App for MidiForgeApp {
             });
 
         egui::CentralPanel::default().show(ui, |ui| {
+            live::live_panel(ui, self);
+            ui.separator();
             mpe::mpe_panel(ui, self);
             stuck_notes_panel(ui, self);
             ui.separator();
@@ -759,8 +772,7 @@ fn activity_dot(ui: &mut egui::Ui, last: Option<&Instant>) {
         egui::Color32::from_rgb(50, 50, 55)
     };
     let (rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
-    ui.painter()
-        .circle_filled(rect.center(), 3.5, color);
+    ui.painter().circle_filled(rect.center(), 3.5, color);
 }
 
 fn stuck_notes_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
@@ -839,11 +851,7 @@ fn event_passes_monitor(app: &MidiForgeApp, event: &MidiEvent) -> bool {
     let q = app.mon_search.to_lowercase();
     let hex = format_wire_hex(&event.packet);
     let decoded = decode(&event.packet).summary();
-    let port = app
-        .port_names
-        .get(&event.port)
-        .cloned()
-        .unwrap_or_default();
+    let port = app.port_names.get(&event.port).cloned().unwrap_or_default();
     hex.to_lowercase().contains(&q)
         || decoded.to_lowercase().contains(&q)
         || port.to_lowercase().contains(&q)

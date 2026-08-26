@@ -2,8 +2,8 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use midi_forge_core::{
-    SysexAssembler, SysexDump, dumps_from_hex, dumps_from_syx, dumps_to_syx, hex_diff,
-    parse_identity_reply,
+    FORGE_MUID, SysexAssembler, SysexDump, discovery_inquiry, dumps_from_hex, dumps_from_syx,
+    dumps_to_syx, hex_diff, parse_ci_discovery, parse_identity_reply,
 };
 use midi_forge_io::{Direction, EndpointId};
 
@@ -80,6 +80,8 @@ impl Librarian {
             if let Some(id) = parse_identity_reply(&dump) {
                 self.identity_note = id.summary();
                 self.identity_stem = id.file_stem();
+            } else if let Some(ci) = parse_ci_discovery(&dump) {
+                self.identity_note = ci.summary();
             }
             self.hex_edit = dump.to_hex();
             self.dumps.push(dump);
@@ -95,7 +97,9 @@ impl Librarian {
 
 pub fn librarian_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     ui.heading("SysEx");
-    ui.weak("Arm receive, then dump from hardware. Handshake waits for an F7 before the next dump.");
+    ui.weak(
+        "Arm receive, then dump from hardware. Handshake waits for an F7 before the next dump.",
+    );
     ui.separator();
 
     let outputs: Vec<(String, String)> = app
@@ -161,7 +165,9 @@ pub fn librarian_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
                 .range(0..=50)
                 .suffix(" ms"),
         )
-        .on_hover_text("Minimum gap between short MIDI messages on thru (0 = off). Helps vintage UARTs.");
+        .on_hover_text(
+            "Minimum gap between short MIDI messages on thru (0 = off). Helps vintage UARTs.",
+        );
     });
     ui.horizontal(|ui| {
         if ui.button("Identity").clicked() {
@@ -169,6 +175,9 @@ pub fn librarian_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         }
         if ui.button("Dump wizard").clicked() {
             start_wizard(app);
+        }
+        if ui.button("MIDI-CI").clicked() {
+            midi_ci_discovery(app);
         }
         if ui.button("Load .syx").clicked() {
             load_syx(app);
@@ -487,6 +496,24 @@ fn start_wizard(app: &mut MidiForgeApp) {
             };
         }
         Err(err) => app.status = format!("Wizard failed: {err}"),
+    }
+}
+
+fn midi_ci_discovery(app: &mut MidiForgeApp) {
+    let Some(dest) = app.librarian.dest.clone() else {
+        app.status = "Pick a SysEx output".into();
+        return;
+    };
+    let id = EndpointId(dest);
+    if let Err(err) = app.set_output_open(&id, true) {
+        app.port_errors.insert(id.0.clone(), err);
+        return;
+    }
+    app.librarian.armed = true;
+    let dump = discovery_inquiry(FORGE_MUID);
+    match app.send_sysex_now(&id, dump.bytes()) {
+        Ok(()) => app.status = "MIDI-CI discovery inquiry sent (broadcast MUID)".into(),
+        Err(err) => app.status = format!("MIDI-CI failed: {err}"),
     }
 }
 

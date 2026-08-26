@@ -69,6 +69,7 @@ pub fn inject_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     ui.horizontal(|ui| {
         ui.label("CC");
         ui.add(egui::DragValue::new(&mut app.inject_cc).range(0..=127));
+        ui.weak(midi_forge_core::cc_label(app.inject_cc));
         let mut val = app.inject_cc_val;
         if ui
             .add(egui::Slider::new(&mut val, 0..=127).text("value"))
@@ -101,7 +102,8 @@ fn piano(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     for (i, off) in WHITE.iter().enumerate() {
         let note = base.saturating_add(*off);
         let x = origin.x + i as f32 * white_w;
-        let r = egui::Rect::from_min_size(egui::pos2(x, origin.y), egui::vec2(white_w - 1.0, white_h));
+        let r =
+            egui::Rect::from_min_size(egui::pos2(x, origin.y), egui::vec2(white_w - 1.0, white_h));
         let id = ui.id().with(("w", note));
         let resp = ui.interact(r, id, egui::Sense::click_and_drag());
         let down = resp.is_pointer_button_down_on();
@@ -166,7 +168,8 @@ fn send_note(app: &mut MidiForgeApp, note: u8, on: bool) {
 
 fn send_cc(app: &mut MidiForgeApp, value: u8) {
     let ch = app.inject_channel.saturating_sub(1).min(15);
-    let packet = UmpMessage::midi1_channel_voice(0, 0xB0 | ch, app.inject_cc.min(127), value.min(127));
+    let packet =
+        UmpMessage::midi1_channel_voice(0, 0xB0 | ch, app.inject_cc.min(127), value.min(127));
     send_inject(app, packet);
 }
 
@@ -181,6 +184,8 @@ fn send_inject(app: &mut MidiForgeApp, packet: UmpMessage) {
         return;
     }
     app.hang.push(&packet);
+    app.live.push(&packet);
+    let _ = app.nrpn.push(&packet);
     if let Err(err) = app.send_packet(&id, &packet) {
         app.status = format!("Inject failed: {err}");
     }

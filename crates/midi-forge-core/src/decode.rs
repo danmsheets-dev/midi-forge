@@ -130,7 +130,11 @@ impl Decoded {
                 controller,
                 value,
                 ..
-            } => format!("Ch{} CC{controller} {value}", channel + 1),
+            } => format!(
+                "Ch{} {} {value}",
+                channel + 1,
+                crate::cc::cc_label(controller)
+            ),
             Self::PolyPressure {
                 channel,
                 note,
@@ -168,7 +172,11 @@ impl Decoded {
                 controller,
                 value,
                 ..
-            } => format!("Ch{} M2 CC{controller} {value}", channel + 1),
+            } => format!(
+                "Ch{} M2 {} {value}",
+                channel + 1,
+                crate::cc::cc_label(controller)
+            ),
             Self::Midi2PolyPressure {
                 channel,
                 note,
@@ -423,6 +431,14 @@ mod tests {
     }
 
     #[test]
+    fn decodes_named_cc() {
+        let msg = UmpMessage::midi1_channel_voice(0, 0xB0, 7, 100);
+        assert_eq!(decode(&msg).summary(), "Ch1 CC7 (Volume) 100");
+        let unknown = UmpMessage::midi1_channel_voice(0, 0xB1, 20, 1);
+        assert_eq!(decode(&unknown).summary(), "Ch2 CC20 1");
+    }
+
+    #[test]
     fn decodes_identity_sysex_from_parser() {
         let mut p = Midi1Parser::new();
         let msgs = p.push_slice(&[0xF0, 0x7E, 0x7F, 0x06, 0x01, 0xF7]);
@@ -468,6 +484,7 @@ mod tests {
                 value: 0x8000_0000
             }
         );
+        assert_eq!(decode(&cc).summary(), "Ch1 M2 CC7 (Volume) 2147483648");
         let pb = UmpMessage::midi2_channel_voice(0, 0xE4, 0, 0, 0x8000_0000);
         assert_eq!(decode(&pb).summary(), "Ch5 M2 PitchBend 2147483648");
     }

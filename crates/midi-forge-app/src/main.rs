@@ -2,6 +2,7 @@
 
 mod app;
 mod inject;
+mod live;
 mod mpe;
 mod script;
 mod sysex;
