@@ -20,7 +20,7 @@ Thru: tick a cell in the bottom matrix (for example MPK mini play → Microsoft 
 
 Uncheck **Clock** to strip MIDI clock. Pause freezes the log but does not stop thru.
 
-SysEx: arm receive on the right panel, or send **Identity request** to the selected output. **Delay after F7** (default 60 ms) spaces dumps when sending a `.syx` file.
+SysEx: arm receive, then dump from hardware. **Dump wizard** retries identity and names the maker (Roland, Yamaha, …). **Handshake** waits for an F7 before the next dump. **Hex diff** compares two captured dumps. **Thru gap** spaces short messages for vintage UARTs. **Gap after F7** still applies between dumps.
 
 MPE: the monitor shows zones (RPN 6) and live notes with bend/pressure/timbre (CC74). **Add cable** creates an in-app loopback on Windows (`forge:loop:*`, not visible to other programs) or a CoreMIDI virtual pair on macOS (other apps can see it). loopMIDI / MIDI Services ports still appear in the Windows endpoint list. When MidiSrv is running the banner shows **MidiSrv**.
 

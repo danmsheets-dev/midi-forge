@@ -10,6 +10,7 @@ mod filter;
 mod hang;
 mod log;
 mod map;
+mod mfr;
 mod midi1;
 mod midi2;
 mod mpe;
@@ -26,6 +27,7 @@ pub use filter::{Filter, MessageKind, message_kind};
 pub use hang::{HangNote, HangTracker};
 pub use log::MonitorLog;
 pub use map::{DataMap, MapAction, MapEntry, MatchKind, Matcher, ValueMap, VoiceKind};
+pub use mfr::manufacturer_name;
 pub use midi1::{
     Midi1Parser, format_wire_hex, midi1_data_len, packed_short_from_ump, ump_from_packed_short,
     ump_from_status_data,
@@ -40,6 +42,6 @@ pub use profile::{PROFILE_VERSION, Profile, ProfileLink};
 pub use router::{Link, Router};
 pub use sysex::{
     IDENTITY_REQUEST, IdentityReply, SysexAssembler, SysexDump, SysexError, dumps_from_hex,
-    dumps_from_syx, dumps_to_syx, parse_identity_reply, roland_checksum_from_sum,
+    dumps_from_syx, dumps_to_syx, hex_diff, parse_identity_reply, roland_checksum_from_sum,
 };
 pub use ump::UmpMessage;

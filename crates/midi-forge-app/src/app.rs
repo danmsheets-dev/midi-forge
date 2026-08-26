@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use midi_forge_core::{
     HangTracker, MessageKind, MidiEvent, MonitorLog, MpeTracker, PortId, Profile, ProfileLink,
-    Router, SysexAssembler, decode, format_wire_hex, message_kind, panic_packets,
+    Router, SysexAssembler, UmpMessage, decode, format_wire_hex, message_kind, panic_packets,
 };
 use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, default_backend};
 
@@ -59,6 +59,9 @@ pub struct MidiForgeApp {
     activity: HashMap<String, Instant>,
     last_hotplug: Instant,
     device_fp: String,
+    pub(crate) throttle_ms: u32,
+    throttle_q: HashMap<String, VecDeque<UmpMessage>>,
+    throttle_at: HashMap<String, Instant>,
 }
 
 impl MidiForgeApp {
@@ -115,6 +118,9 @@ impl MidiForgeApp {
             activity: HashMap::new(),
             last_hotplug: Instant::now(),
             device_fp: String::new(),
+            throttle_ms: 0,
+            throttle_q: HashMap::new(),
+            throttle_at: HashMap::new(),
         };
 
         let inputs: Vec<EndpointId> = app
@@ -244,6 +250,12 @@ impl MidiForgeApp {
                         {
                             self.port_errors.insert(dest.0, err.to_string());
                         }
+                    } else if self.throttle_ms > 0 {
+                        let q = self.throttle_q.entry(dest.0.clone()).or_default();
+                        if q.len() >= 4096 {
+                            q.pop_front();
+                        }
+                        q.push_back(routed.packet);
                     } else if let Err(err) = self.backend.send(&dest, &routed.packet) {
                         self.port_errors.insert(dest.0, err.to_string());
                     }
@@ -339,6 +351,39 @@ impl MidiForgeApp {
             self.status = format!("{} endpoint(s)", self.endpoints.len());
         }
         self.device_fp = device_fingerprint(&self.endpoints);
+    }
+
+    fn tick_throttle(&mut self) {
+        let gap = Duration::from_millis(u64::from(self.throttle_ms).max(1));
+        let dests: Vec<String> = self.throttle_q.keys().cloned().collect();
+        let now = Instant::now();
+        for dest in dests {
+            if self.throttle_ms == 0 {
+                while let Some(packet) = self
+                    .throttle_q
+                    .get_mut(&dest)
+                    .and_then(|q| q.pop_front())
+                {
+                    let _ = self.backend.send(&EndpointId(dest.clone()), &packet);
+                }
+                continue;
+            }
+            let ready = self
+                .throttle_at
+                .get(&dest)
+                .is_none_or(|t| now.saturating_duration_since(*t) >= gap);
+            if !ready {
+                continue;
+            }
+            let Some(packet) = self.throttle_q.get_mut(&dest).and_then(|q| q.pop_front()) else {
+                continue;
+            };
+            if let Err(err) = self.backend.send(&EndpointId(dest.clone()), &packet) {
+                self.port_errors.insert(dest.clone(), err.to_string());
+            }
+            self.throttle_at.insert(dest, Instant::now());
+        }
+        self.throttle_q.retain(|_, q| !q.is_empty());
     }
 
     fn poll_hotplug(&mut self) {
@@ -456,6 +501,7 @@ impl MidiForgeApp {
 impl eframe::App for MidiForgeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.drain_capture();
+        self.tick_throttle();
         self.poll_hotplug();
         sysex::tick_send(self, ui.ctx());
         ui.ctx().request_repaint_after(Duration::from_millis(16));

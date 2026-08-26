@@ -1,3 +1,4 @@
+use crate::mfr::manufacturer_name;
 use crate::ump::UmpMessage;
 
 /// Universal identity request (non-realtime, all devices).
@@ -232,15 +233,23 @@ pub struct IdentityReply {
 }
 
 impl IdentityReply {
+    pub fn manufacturer_label(&self) -> String {
+        manufacturer_name(&self.manufacturer).map_or_else(
+            || {
+                self.manufacturer
+                    .iter()
+                    .map(|b| format!("{b:02X}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            },
+            |n| n.to_string(),
+        )
+    }
+
     pub fn summary(&self) -> String {
-        let mfr = self
-            .manufacturer
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect::<Vec<_>>()
-            .join(" ");
         format!(
-            "Identity ch/dev {device:02X} mfr [{mfr}] family {family:04X} member {member:04X} sw {sw}",
+            "{mfr}  ch/dev {device:02X}  family {family:04X}  member {member:04X}  sw {sw}",
+            mfr = self.manufacturer_label(),
             device = self.device,
             family = self.family,
             member = self.member,
@@ -249,9 +258,55 @@ impl IdentityReply {
                 .iter()
                 .map(|b| format!("{b:02X}"))
                 .collect::<Vec<_>>()
-                .join(" ")
+                .join(".")
         )
     }
+
+    pub fn file_stem(&self) -> String {
+        let mfr = self
+            .manufacturer_label()
+            .to_lowercase()
+            .replace([' ', '/'], "-");
+        format!("{mfr}-{family:04x}-{member:04x}", family = self.family, member = self.member)
+    }
+}
+
+/// Line-oriented hex dump of bytes that differ between `a` and `b`.
+pub fn hex_diff(a: &[u8], b: &[u8]) -> String {
+    if a == b {
+        return format!("identical ({} bytes)", a.len());
+    }
+    let mut out = format!("A {} B {} bytes\n", a.len(), b.len());
+    let n = a.len().max(b.len());
+    let mut i = 0;
+    while i < n {
+        let end = (i + 16).min(n);
+        let row_a = a.get(i..end.min(a.len())).unwrap_or(&[]);
+        let row_b = b.get(i..end.min(b.len())).unwrap_or(&[]);
+        if row_a != row_b {
+            out.push_str(&format!(
+                "{i:04X}  {:<47} |  {:<47}\n",
+                hex_row(a, i, end),
+                hex_row(b, i, end)
+            ));
+        }
+        i = end;
+    }
+    out
+}
+
+fn hex_row(bytes: &[u8], start: usize, end: usize) -> String {
+    let mut s = String::new();
+    for i in start..end {
+        if i != start {
+            s.push(' ');
+        }
+        match bytes.get(i) {
+            Some(b) => s.push_str(&format!("{b:02X}")),
+            None => s.push_str("  "),
+        }
+    }
+    s
 }
 
 pub fn parse_identity_reply(dump: &SysexDump) -> Option<IdentityReply> {
@@ -355,6 +410,18 @@ mod tests {
         assert_eq!(id.family, 0x0100);
         assert_eq!(id.member, 0x0200);
         assert_eq!(id.software, [1, 2, 3, 4]);
+        assert_eq!(id.manufacturer_label(), "Yamaha");
+        assert!(id.summary().contains("Yamaha"));
+    }
+
+    #[test]
+    fn hex_diff_reports_changed_row() {
+        let a = [0xF0, 0x41, 0x10, 0xF7];
+        let b = [0xF0, 0x41, 0x11, 0xF7];
+        let d = hex_diff(&a, &b);
+        assert!(d.contains("10"));
+        assert!(d.contains("11"));
+        assert_eq!(hex_diff(&a, &a), "identical (4 bytes)");
     }
 
     #[test]
