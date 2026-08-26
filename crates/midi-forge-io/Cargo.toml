@@ -1,0 +1,11 @@
+[package]
+name = "midi-forge-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Platform MIDI backends for Midi-Forge"
+
+[dependencies]
+midi-forge-core.workspace = true
+thiserror.workspace = true

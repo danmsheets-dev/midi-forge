@@ -1,0 +1,20 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/midi-forge-core",
+    "crates/midi-forge-io",
+    "crates/midi-forge-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/midiforge/midi-forge"
+rust-version = "1.95"
+
+[workspace.dependencies]
+midi-forge-core = { path = "crates/midi-forge-core" }
+midi-forge-io = { path = "crates/midi-forge-io" }
+thiserror = "2.0.20"
+eframe = "0.36.1"

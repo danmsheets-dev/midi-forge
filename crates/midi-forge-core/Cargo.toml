@@ -1,0 +1,10 @@
+[package]
+name = "midi-forge-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "UMP-canonical MIDI parse, event, and decode engine for Midi-Forge"
+
+[dependencies]
+thiserror.workspace = true
