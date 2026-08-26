@@ -1,4 +1,5 @@
 mod app;
+mod thru;
 
 use midi_forge_io::{Direction, MidiBackend, default_backend};
 

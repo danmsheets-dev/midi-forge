@@ -8,8 +8,10 @@ mod error;
 mod event;
 mod filter;
 mod log;
+mod map;
 mod midi1;
 mod panic;
+mod profile;
 mod router;
 mod ump;
 
@@ -18,10 +20,12 @@ pub use error::CoreError;
 pub use event::{MidiEvent, PortId, Timestamp};
 pub use filter::{Filter, MessageKind, message_kind};
 pub use log::MonitorLog;
+pub use map::{DataMap, MapAction, MapEntry, MatchKind, Matcher, ValueMap, VoiceKind};
 pub use midi1::{
     Midi1Parser, format_wire_hex, midi1_data_len, packed_short_from_ump, ump_from_packed_short,
     ump_from_status_data,
 };
 pub use panic::panic_packets;
+pub use profile::{PROFILE_VERSION, Profile, ProfileLink};
 pub use router::{Link, Router};
 pub use ump::UmpMessage;

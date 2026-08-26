@@ -8,3 +8,5 @@ description = "UMP-canonical MIDI parse, event, and decode engine for Midi-Forge
 
 [dependencies]
 thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true

@@ -3,26 +3,29 @@ use std::time::Duration;
 
 use eframe::egui;
 use midi_forge_core::{
-    MidiEvent, MonitorLog, PortId, Router, decode, format_wire_hex, panic_packets,
+    MidiEvent, MonitorLog, PortId, Profile, ProfileLink, Router, decode, format_wire_hex,
+    panic_packets,
 };
 use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, default_backend};
+
+use crate::thru;
 
 pub struct MidiForgeApp {
     backend: Box<dyn MidiBackend>,
     backend_name: String,
-    endpoints: Vec<Endpoint>,
+    pub(crate) endpoints: Vec<Endpoint>,
     log: MonitorLog,
-    router: Router,
+    pub(crate) router: Router,
     paused: bool,
     follow: bool,
     dropped: u64,
     open_inputs: HashSet<String>,
     open_outputs: HashSet<String>,
-    port_names: HashMap<PortId, String>,
+    pub(crate) port_names: HashMap<PortId, String>,
     port_by_endpoint: HashMap<String, PortId>,
     endpoint_by_port: HashMap<PortId, EndpointId>,
-    port_errors: HashMap<String, String>,
-    selected_link: Option<(PortId, PortId)>,
+    pub(crate) port_errors: HashMap<String, String>,
+    pub(crate) selected_link: Option<(PortId, PortId)>,
     next_port: u32,
     capture_buf: Vec<MidiEvent>,
     status: String,
@@ -72,7 +75,7 @@ impl MidiForgeApp {
         app
     }
 
-    fn ensure_port(&mut self, id: &EndpointId) -> PortId {
+    pub(crate) fn ensure_port(&mut self, id: &EndpointId) -> PortId {
         if let Some(&port) = self.port_by_endpoint.get(&id.0) {
             return port;
         }
@@ -124,7 +127,12 @@ impl MidiForgeApp {
         Ok(())
     }
 
-    fn set_thru(&mut self, from: &EndpointId, to: &EndpointId, linked: bool) -> Result<(), String> {
+    pub(crate) fn set_thru(
+        &mut self,
+        from: &EndpointId,
+        to: &EndpointId,
+        linked: bool,
+    ) -> Result<(), String> {
         if linked {
             self.set_input_open(from, true)?;
             self.set_output_open(to, true)?;
@@ -193,6 +201,87 @@ impl MidiForgeApp {
         }
         self.status = format!("Panic: sent {sent} short messages to open outputs");
     }
+
+    fn to_profile(&self) -> Profile {
+        let links = self
+            .router
+            .links()
+            .iter()
+            .filter_map(|l| {
+                Some(ProfileLink {
+                    from: self.endpoint_by_port.get(&l.from)?.0.clone(),
+                    to: self.endpoint_by_port.get(&l.to)?.0.clone(),
+                    filter: l.filter.clone(),
+                    map: l.map.clone(),
+                })
+            })
+            .collect();
+        Profile::new(links)
+    }
+
+    fn apply_profile(&mut self, profile: Profile) {
+        self.router.clear();
+        self.selected_link = None;
+        let mut loaded = 0usize;
+        let mut skipped = 0usize;
+        for link in profile.links {
+            let from = EndpointId(link.from);
+            let to = EndpointId(link.to);
+            let known = self.endpoints.iter().any(|e| e.id == from)
+                && self.endpoints.iter().any(|e| e.id == to);
+            if !known {
+                skipped += 1;
+                continue;
+            }
+            match self.set_thru(&from, &to, true) {
+                Ok(()) => {
+                    let fp = self.ensure_port(&from);
+                    let tp = self.ensure_port(&to);
+                    self.router.set_filter(fp, tp, link.filter);
+                    self.router.set_map(fp, tp, link.map);
+                    loaded += 1;
+                }
+                Err(err) => {
+                    self.port_errors.insert(to.0, err);
+                    skipped += 1;
+                }
+            }
+        }
+        self.status = format!("Loaded {loaded} thru links ({skipped} skipped)");
+    }
+
+    fn save_profile_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Midi-Forge profile", &["json"])
+            .set_file_name("midi-forge.json")
+            .save_file()
+        else {
+            return;
+        };
+        match self.to_profile().to_json() {
+            Ok(json) => match std::fs::write(&path, json) {
+                Ok(()) => self.status = format!("Saved {}", path.display()),
+                Err(err) => self.status = format!("Save failed: {err}"),
+            },
+            Err(err) => self.status = format!("Save failed: {err}"),
+        }
+    }
+
+    fn load_profile_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Midi-Forge profile", &["json"])
+            .pick_file()
+        else {
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(json) => match Profile::from_json(&json) {
+                Ok(profile) => self.apply_profile(profile),
+                Err(err) => self.status = format!("Load failed: {err}"),
+            },
+            Err(err) => self.status = format!("Load failed: {err}"),
+        }
+    }
 }
 
 impl eframe::App for MidiForgeApp {
@@ -206,7 +295,14 @@ impl eframe::App for MidiForgeApp {
             ui.horizontal(|ui| {
                 ui.heading("Midi-Forge");
                 ui.separator();
-                ui.label("Phase 2 — thru + filter");
+                ui.label("Phase 3 — maps + patchbay");
+                ui.separator();
+                if ui.button("Save").clicked() {
+                    self.save_profile_dialog();
+                }
+                if ui.button("Load").clicked() {
+                    self.load_profile_dialog();
+                }
                 ui.separator();
                 if ui
                     .selectable_label(self.paused, if self.paused { "Paused" } else { "Pause" })
@@ -291,10 +387,10 @@ impl eframe::App for MidiForgeApp {
             });
 
         egui::Panel::bottom("thru")
-            .default_size(260.0)
+            .default_size(320.0)
             .resizable(true)
             .show(ui, |ui| {
-                thru_panel(ui, self);
+                thru::thru_panel(ui, self);
             });
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -325,147 +421,6 @@ impl eframe::App for MidiForgeApp {
     }
 }
 
-fn thru_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
-    ui.horizontal(|ui| {
-        ui.heading("Thru");
-        ui.weak("Tick a cell to route. Filters apply to the selected cell.");
-    });
-    ui.separator();
-
-    let inputs: Vec<Endpoint> = app
-        .endpoints
-        .iter()
-        .filter(|e| e.direction == Direction::Input)
-        .cloned()
-        .collect();
-    let outputs: Vec<Endpoint> = app
-        .endpoints
-        .iter()
-        .filter(|e| e.direction == Direction::Output)
-        .cloned()
-        .collect();
-
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            if inputs.is_empty() || outputs.is_empty() {
-                ui.label("Need at least one input and one output.");
-                return;
-            }
-            egui::Grid::new("thru_matrix").striped(true).show(ui, |ui| {
-                ui.label("");
-                for out in &outputs {
-                    ui.strong(truncate(&out.name, 14));
-                }
-                ui.end_row();
-                for inp in &inputs {
-                    ui.strong(truncate(&inp.name, 16));
-                    for out in &outputs {
-                        let from = app.ensure_port(&inp.id);
-                        let to = app.ensure_port(&out.id);
-                        let mut on = app.router.is_linked(from, to);
-                        let selected = app.selected_link == Some((from, to));
-                        ui.horizontal(|ui| {
-                            if ui.checkbox(&mut on, "").changed()
-                                && let Err(err) = app.set_thru(&inp.id, &out.id, on)
-                            {
-                                app.port_errors.insert(out.id.0.clone(), err);
-                            }
-                            if selected {
-                                ui.weak("●");
-                            } else if ui.small_button("f").on_hover_text("Edit filter").clicked()
-                                && app.router.is_linked(from, to)
-                            {
-                                app.selected_link = Some((from, to));
-                            }
-                        });
-                    }
-                    ui.end_row();
-                }
-            });
-        });
-
-        ui.separator();
-        ui.vertical(|ui| {
-            filter_editor(ui, app);
-        });
-    });
-}
-
-fn filter_editor(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
-    let Some((from, to)) = app.selected_link else {
-        ui.weak("Select a thru cell (f) to edit its filter.");
-        return;
-    };
-    let Some(mut filter) = app.router.filter(from, to).cloned() else {
-        ui.weak("That cell is not connected.");
-        return;
-    };
-
-    let from_name = app
-        .port_names
-        .get(&from)
-        .cloned()
-        .unwrap_or_else(|| format!("{}", from.0));
-    let to_name = app
-        .port_names
-        .get(&to)
-        .cloned()
-        .unwrap_or_else(|| format!("{}", to.0));
-    ui.strong(format!("{from_name}  →  {to_name}"));
-    ui.add_space(4.0);
-    ui.label("Pass");
-    ui.horizontal_wrapped(|ui| {
-        ui.checkbox(&mut filter.notes, "Notes");
-        ui.checkbox(&mut filter.poly_pressure, "Poly press");
-        ui.checkbox(&mut filter.control_change, "CC");
-        ui.checkbox(&mut filter.program_change, "Program");
-        ui.checkbox(&mut filter.channel_pressure, "Chan press");
-        ui.checkbox(&mut filter.pitch_bend, "Bend");
-        ui.checkbox(&mut filter.sysex, "SysEx");
-        ui.checkbox(&mut filter.clock, "Clock");
-        ui.checkbox(&mut filter.transport, "Start/Stop");
-        ui.checkbox(&mut filter.active_sensing, "Sensing");
-        ui.checkbox(&mut filter.reset, "Reset");
-        ui.checkbox(&mut filter.system_common, "Sys common");
-    });
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label("Channels");
-        if ui.small_button("All").clicked() {
-            filter.set_all_channels(true);
-        }
-        if ui.small_button("None").clicked() {
-            filter.set_all_channels(false);
-        }
-    });
-    ui.horizontal_wrapped(|ui| {
-        for ch in 0..16u8 {
-            let mut on = filter.channel_enabled(ch);
-            if ui.checkbox(&mut on, format!("{}", ch + 1)).changed() {
-                filter.set_channel_enabled(ch, on);
-            }
-        }
-    });
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.label("Force channel");
-        let mut ch = i32::from(filter.force_channel.map(|c| c + 1).unwrap_or(0));
-        if ui
-            .add(egui::DragValue::new(&mut ch).range(0..=16).prefix("Ch "))
-            .changed()
-        {
-            filter.force_channel = if ch == 0 {
-                None
-            } else {
-                Some((ch as u8).saturating_sub(1))
-            };
-        }
-        ui.weak("0 = keep");
-    });
-
-    app.router.set_filter(from, to, filter);
-}
-
 fn header_row(ui: &mut egui::Ui) {
     ui.horizontal(|ui| {
         ui.monospace(egui::RichText::new(format!("{:<10}", "Time")).strong());
@@ -491,7 +446,7 @@ fn event_row(ui: &mut egui::Ui, event: &MidiEvent, names: &HashMap<PortId, Strin
     });
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

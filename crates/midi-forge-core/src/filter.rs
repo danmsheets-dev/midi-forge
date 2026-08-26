@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::ump::UmpMessage;
 
 /// Which family a packet belongs to for thru filtering.
@@ -43,7 +45,8 @@ pub fn message_kind(msg: &UmpMessage) -> MessageKind {
 }
 
 /// Per-connection thru filter. Default is pass-through.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Filter {
     pub notes: bool,
     pub poly_pressure: bool,

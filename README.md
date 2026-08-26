@@ -2,7 +2,7 @@
 
 Modern 64-bit MIDI diagnostic and routing utility (MIDI-OX successor). Rust engine, native Windows/macOS desktop first.
 
-Phase 2 is a live Windows monitor plus N×M thru with per-connection filters.
+Phase 3 adds MIDI-OX-style data maps, a visual patchbay, and JSON profiles.
 
 ## Build
 
@@ -16,7 +16,9 @@ cargo run -p midi-forge-app
 
 `--list` prints WinMM inputs and outputs. The GUI auto-opens every input. Play notes on a connected keyboard and they should appear in the monitor.
 
-Thru: tick a cell in the bottom matrix (for example MPK mini play → Microsoft GS Wavetable Synth). Uncheck **Clock** on that cell to strip MIDI clock. Pause freezes the log but does not stop thru.
+Thru: tick a cell in the bottom matrix (for example MPK mini play → Microsoft GS Wavetable Synth). Cables on the patchbay follow the same graph. Select a cell to edit its filter and data map (transpose, CC remap, invert velocity, type conversion). **Save** / **Load** write a JSON profile.
+
+Uncheck **Clock** to strip MIDI clock. Pause freezes the log but does not stop thru.
 
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 
