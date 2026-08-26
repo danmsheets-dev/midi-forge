@@ -13,6 +13,7 @@ mod midi1;
 mod panic;
 mod profile;
 mod router;
+mod sysex;
 mod ump;
 
 pub use decode::{Decoded, decode};
@@ -28,4 +29,8 @@ pub use midi1::{
 pub use panic::panic_packets;
 pub use profile::{PROFILE_VERSION, Profile, ProfileLink};
 pub use router::{Link, Router};
+pub use sysex::{
+    IDENTITY_REQUEST, IdentityReply, SysexAssembler, SysexDump, SysexError, dumps_from_hex,
+    dumps_from_syx, dumps_to_syx, parse_identity_reply, roland_checksum_from_sum,
+};
 pub use ump::UmpMessage;

@@ -12,6 +12,7 @@ pub struct NullBackend {
     open_outputs: HashSet<String>,
     pending: Vec<MidiEvent>,
     sent: Vec<(String, UmpMessage)>,
+    sent_sysex: Vec<(String, Vec<u8>)>,
     dropped: u64,
 }
 
@@ -23,6 +24,7 @@ impl NullBackend {
             open_outputs: HashSet::new(),
             pending: Vec::new(),
             sent: Vec::new(),
+            sent_sysex: Vec::new(),
             dropped: 0,
         }
     }
@@ -47,6 +49,7 @@ impl NullBackend {
             open_outputs: HashSet::new(),
             pending: Vec::new(),
             sent: Vec::new(),
+            sent_sysex: Vec::new(),
             dropped: 0,
         }
     }
@@ -57,6 +60,10 @@ impl NullBackend {
 
     pub fn sent(&self) -> &[(String, UmpMessage)] {
         &self.sent
+    }
+
+    pub fn sent_sysex(&self) -> &[(String, Vec<u8>)] {
+        &self.sent_sysex
     }
 }
 
@@ -109,6 +116,17 @@ impl MidiBackend for NullBackend {
             return Err(IoError::NotFound(id.0.clone()));
         }
         self.sent.push((id.0.clone(), *packet));
+        Ok(())
+    }
+
+    fn send_sysex(&mut self, id: &EndpointId, bytes: &[u8]) -> Result<(), IoError> {
+        if !self.open_outputs.contains(&id.0) {
+            return Err(IoError::NotFound(id.0.clone()));
+        }
+        if bytes.first() != Some(&0xF0) || bytes.last() != Some(&0xF7) {
+            return Err(IoError::UnsupportedPacket);
+        }
+        self.sent_sysex.push((id.0.clone(), bytes.to_vec()));
         Ok(())
     }
 }
@@ -180,5 +198,17 @@ mod tests {
             packed_short_from_ump(&backend.sent()[0].1).unwrap() & 0xFF,
             0xB0
         );
+    }
+
+    #[test]
+    fn send_sysex_records_identity_request() {
+        let mut backend = NullBackend::with_fixture_ports();
+        let id = EndpointId("null:out:0".into());
+        backend.open_output(&id, PortId(2)).unwrap();
+        backend
+            .send_sysex(&id, &midi_forge_core::IDENTITY_REQUEST)
+            .unwrap();
+        assert_eq!(backend.sent_sysex().len(), 1);
+        assert_eq!(backend.sent_sysex()[0].1, midi_forge_core::IDENTITY_REQUEST);
     }
 }

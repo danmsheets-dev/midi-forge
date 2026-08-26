@@ -123,6 +123,26 @@ impl UmpMessage {
         (self.words[0] & 0xFF) as u8
     }
 
+    /// SysEx7: (status 0–3, valid byte count, payload). F0/F7 are not included.
+    pub fn sysex7_parts(&self) -> Option<(u8, u8, [u8; 6])> {
+        if self.message_type() != 0x3 {
+            return None;
+        }
+        let w0 = self.words[0];
+        let w1 = self.words.get(1).copied().unwrap_or(0);
+        let status = ((w0 >> 20) & 0xF) as u8;
+        let count = ((w0 >> 16) & 0xF) as u8;
+        let data = [
+            ((w0 >> 8) & 0xFF) as u8,
+            (w0 & 0xFF) as u8,
+            ((w1 >> 24) & 0xFF) as u8,
+            ((w1 >> 16) & 0xFF) as u8,
+            ((w1 >> 8) & 0xFF) as u8,
+            (w1 & 0xFF) as u8,
+        ];
+        Some((status, count, data))
+    }
+
     /// MIDI 1.0 channel (0–15) for channel-voice packets.
     pub fn channel(&self) -> Option<u8> {
         (self.message_type() == 0x2).then_some(self.status_byte() & 0x0F)

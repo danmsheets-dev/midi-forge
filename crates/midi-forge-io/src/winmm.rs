@@ -5,6 +5,7 @@ use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
+use std::time::{Duration, Instant};
 
 use midi_forge_core::{
     Midi1Parser, MidiEvent, PortId, Timestamp, UmpMessage, packed_short_from_ump,
@@ -24,6 +25,8 @@ const MIM_LONGDATA: u32 = 0x3C4;
 const SYSEX_BUFFERS: usize = 8;
 const SYSEX_CAP: usize = 1024;
 const QUEUE_CAP: usize = 4096;
+const MHDR_DONE: u32 = 0x0000_0001;
+const SYSEX_SEND_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[repr(C)]
 struct MidiInCapsW {
@@ -110,6 +113,9 @@ unsafe extern "system" {
     ) -> u32;
     fn midiOutClose(handle: usize) -> u32;
     fn midiOutShortMsg(handle: usize, msg: u32) -> u32;
+    fn midiOutPrepareHeader(handle: usize, header: *mut MidiHdr, size: u32) -> u32;
+    fn midiOutLongMsg(handle: usize, header: *mut MidiHdr, size: u32) -> u32;
+    fn midiOutUnprepareHeader(handle: usize, header: *mut MidiHdr, size: u32) -> u32;
 }
 
 #[derive(Clone, Copy)]
@@ -347,6 +353,50 @@ impl MidiBackend for WinMmBackend {
         }
         Ok(())
     }
+
+    fn send_sysex(&mut self, id: &EndpointId, bytes: &[u8]) -> Result<(), IoError> {
+        let Some(output) = self.outputs.get(&id.0) else {
+            return Err(IoError::NotFound(id.0.clone()));
+        };
+        if bytes.first() != Some(&0xF0) || bytes.last() != Some(&0xF7) {
+            return Err(IoError::UnsupportedPacket);
+        }
+        send_long_message(output.handle, bytes)
+    }
+}
+
+fn send_long_message(handle: usize, bytes: &[u8]) -> Result<(), IoError> {
+    let mut data = bytes.to_vec();
+    let mut hdr = Box::new(MidiHdr::empty());
+    hdr.lp_data = data.as_mut_ptr();
+    hdr.buffer_length = data.len() as u32;
+    let hdr_size = size_of::<MidiHdr>() as u32;
+    let rc = unsafe { midiOutPrepareHeader(handle, hdr.as_mut(), hdr_size) };
+    if rc != MMSYSERR_NOERROR {
+        return Err(mm_error(rc, "midiOutPrepareHeader"));
+    }
+    let rc = unsafe { midiOutLongMsg(handle, hdr.as_mut(), hdr_size) };
+    if rc != MMSYSERR_NOERROR {
+        unsafe {
+            midiOutUnprepareHeader(handle, hdr.as_mut(), hdr_size);
+        }
+        return Err(mm_error(rc, "midiOutLongMsg"));
+    }
+    let deadline = Instant::now() + SYSEX_SEND_TIMEOUT;
+    while hdr.flags & MHDR_DONE == 0 {
+        if Instant::now() > deadline {
+            unsafe {
+                midiOutUnprepareHeader(handle, hdr.as_mut(), hdr_size);
+            }
+            return Err(IoError::Backend("SysEx send timed out".into()));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let rc = unsafe { midiOutUnprepareHeader(handle, hdr.as_mut(), hdr_size) };
+    if rc != MMSYSERR_NOERROR {
+        return Err(mm_error(rc, "midiOutUnprepareHeader"));
+    }
+    Ok(())
 }
 
 fn prepare_sysex(handle: usize) -> Result<PreparedSysex, IoError> {

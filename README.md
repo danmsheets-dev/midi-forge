@@ -2,7 +2,7 @@
 
 Modern 64-bit MIDI diagnostic and routing utility (MIDI-OX successor). Rust engine, native Windows/macOS desktop first.
 
-Phase 3 adds MIDI-OX-style data maps, a visual patchbay, and JSON profiles.
+Phase 4 adds a SysEx librarian: identity request, armed receive, `.syx` load/save, hex editor, Roland checksum, and delay-after-F7 send.
 
 ## Build
 
@@ -19,6 +19,8 @@ cargo run -p midi-forge-app
 Thru: tick a cell in the bottom matrix (for example MPK mini play → Microsoft GS Wavetable Synth). Cables on the patchbay follow the same graph. Select a cell to edit its filter and data map (transpose, CC remap, invert velocity, type conversion). **Save** / **Load** write a JSON profile.
 
 Uncheck **Clock** to strip MIDI clock. Pause freezes the log but does not stop thru.
+
+SysEx: arm receive on the right panel, or send **Identity request** to the selected output. **Delay after F7** (default 60 ms) spaces dumps when sending a `.syx` file.
 
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 

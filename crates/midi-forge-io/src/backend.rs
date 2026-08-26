@@ -40,6 +40,8 @@ pub trait MidiBackend {
     /// because the capture queue was full.
     fn poll(&mut self, out: &mut Vec<MidiEvent>) -> u64;
     fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError>;
+    /// Send a complete SysEx dump (`F0…F7`) as a long message.
+    fn send_sysex(&mut self, id: &EndpointId, bytes: &[u8]) -> Result<(), IoError>;
 }
 
 pub fn default_backend() -> Box<dyn MidiBackend> {
