@@ -1,16 +1,19 @@
 use eframe::egui;
-use midi_forge_core::{MpeZoneKind, bend_semitones, mcm_packets};
-use midi_forge_io::{Direction, EndpointId};
+use midi_forge_core::{MpeZoneKind, bend_semitones, mcm_packets, pitch_bend_range_packets};
+use midi_forge_io::{Direction, EndpointId, create_wms_loopback};
 
 use crate::app::MidiForgeApp;
 
 pub fn mpe_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     ui.horizontal(|ui| {
         ui.heading("MPE");
+        let summary = app.mpe.mode_summary();
         if app.mpe.configured() {
-            ui.weak("zones from RPN 6");
+            ui.colored_label(egui::Color32::from_rgb(80, 200, 120), summary);
+        } else if app.mpe.likely_mpe() {
+            ui.colored_label(egui::Color32::from_rgb(220, 160, 60), summary);
         } else {
-            ui.weak("no MCM yet — voices still tracked");
+            ui.weak(summary);
         }
     });
     ui.horizontal(|ui| {
@@ -52,6 +55,20 @@ pub fn mpe_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         if ui.button("Clear voices").clicked() {
             app.mpe.clear_voices();
         }
+        if ui
+            .button("Note PB 48")
+            .on_hover_text("RPN 0 pitch bend range 48 on member-style ch 2")
+            .clicked()
+        {
+            send_pb_range(app, 1, 48);
+        }
+        if ui
+            .button("Master PB 2")
+            .on_hover_text("RPN 0 pitch bend range 2 on lower master (ch 1)")
+            .clicked()
+        {
+            send_pb_range(app, 0, 2);
+        }
     });
 
     egui::ScrollArea::vertical()
@@ -86,12 +103,23 @@ pub fn mpe_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
                     ui.monospace(format!("{:>3}", v.pressure));
                     ui.monospace(format!("{:>3}", v.timbre));
                     ui.weak(app.mpe.role(v.channel));
+                    mini_bar(ui, v.pressure, egui::Color32::from_rgb(90, 180, 255));
+                    mini_bar(ui, v.timbre, egui::Color32::from_rgb(200, 140, 80));
                 });
             }
         });
 }
 
-fn send_mcm(app: &mut MidiForgeApp, zone: MpeZoneKind) {
+fn mini_bar(ui: &mut egui::Ui, value: u8, color: egui::Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(28.0, 10.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 1.0, egui::Color32::from_rgb(40, 40, 48));
+    let mut fill = rect;
+    fill.set_width(rect.width() * f32::from(value) / 127.0);
+    ui.painter().rect_filled(fill, 1.0, color);
+}
+
+fn send_packets(app: &mut MidiForgeApp, packets: &[midi_forge_core::UmpMessage], what: &str) {
     let Some(dest) = app
         .endpoints
         .iter()
@@ -104,34 +132,59 @@ fn send_mcm(app: &mut MidiForgeApp, zone: MpeZoneKind) {
                 .map(|e| e.id.clone())
         })
     else {
-        app.status = "Open an output to send MCM".into();
+        app.status = format!("Open an output to send {what}");
         return;
     };
     if let Err(err) = app.set_output_open(&dest, true) {
         app.port_errors.insert(dest.0.clone(), err);
         return;
     }
-    let members = app.mpe_members;
     let mut sent = 0usize;
-    for packet in mcm_packets(zone, members) {
-        match app.send_packet(&dest, &packet) {
+    for packet in packets {
+        match app.send_packet(&dest, packet) {
             Ok(()) => sent += 1,
             Err(err) => {
-                app.status = format!("MCM send failed: {err}");
+                app.status = format!("{what} send failed: {err}");
                 return;
             }
         }
     }
-    app.status = format!(
-        "Sent MCM {zone:?} members={members} ({sent} packets) to {}",
-        dest.0
+    app.status = format!("Sent {what} ({sent} packets) to {}", dest.0);
+}
+
+fn send_pb_range(app: &mut MidiForgeApp, channel: u8, semitones: u8) {
+    send_packets(
+        app,
+        &pitch_bend_range_packets(channel, semitones),
+        &format!("PB range ±{semitones} ch{}", channel + 1),
     );
+}
+
+fn send_mcm(app: &mut MidiForgeApp, zone: MpeZoneKind) {
+    let members = app.mpe_members;
+    send_packets(
+        app,
+        &mcm_packets(zone, members),
+        &format!("MCM {zone:?} members={members}"),
+    );
+}
+
+fn add_wms_loop(app: &mut MidiForgeApp) {
+    match create_wms_loopback(&app.cable_name) {
+        Ok(msg) => {
+            app.refresh_devices();
+            app.status = msg;
+        }
+        Err(err) => app.status = err,
+    }
 }
 
 pub fn virtual_cables_ui(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     ui.separator();
     ui.heading("Virtual cables");
-    ui.weak("Windows: app-local (DAWs see loopMIDI / MidiSrv). macOS: CoreMIDI virtual ports other apps can see.");
+    ui.weak(
+        "Add cable = in-app (DAWs cannot see it). Add DAW loop = midi.exe WMS pair (DAWs can).",
+    );
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut app.cable_name)
@@ -140,6 +193,13 @@ pub fn virtual_cables_ui(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         );
         if ui.button("Add cable").clicked() {
             add_cable(app);
+        }
+        if ui
+            .button("Add DAW loop")
+            .on_hover_text("midi loopback create --root-name (needs MidiSrv + SDK Tools)")
+            .clicked()
+        {
+            add_wms_loop(app);
         }
     });
     let forge: Vec<EndpointId> = app

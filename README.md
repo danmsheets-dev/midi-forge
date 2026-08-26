@@ -32,6 +32,8 @@ Lua: the right panel **Lua** tab. **Apply** compiles, **Enable** runs `on_midi` 
 
 **Clock** shows host-receive BPM, jitter, runaway clock, song position, and MTC. Histograms are USB/driver timing, not 5-pin delay. **Thru path** lists which outputs a note actually hit. **Snap** copies live + clock + stuck notes + recent thru. **Learn** on a thru map waits for the next CC/note. Exclusive-open errors name likely DAWs from window titles. **On top** + a larger **PANIC** are for the live bench.
 
+**Scenes** (name + Save scene) store thru, Lua, mute clock, and throttle in the JSON profile. SysEx **pack** sends GM/GS/XG/Sequential/Korg/Yamaha dump requests. **CI Profiles** / **CI PE** are MIDI-CI inquiries (not full property-exchange JSON). MPE shows whether a zone is actually configured. **Add DAW loop** runs `midi loopback create` when MidiSrv and SDK Tools are present — still not a native `MidiSession`.
+
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 
 ## Crates

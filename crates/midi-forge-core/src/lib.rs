@@ -18,6 +18,7 @@ mod midi2;
 mod midi_ci;
 mod mpe;
 mod nrpn;
+mod packs;
 mod panic;
 mod profile;
 mod route;
@@ -36,7 +37,10 @@ pub use live::{LiveChannel, LiveView};
 pub use log::MonitorLog;
 pub use map::{DataMap, MapAction, MapEntry, MatchKind, Matcher, ValueMap, VoiceKind};
 pub use mfr::{manufacturer_label, manufacturer_name};
-pub use midi_ci::{CiDiscovery, FORGE_MUID, discovery_inquiry, parse_ci_discovery};
+pub use midi_ci::{
+    CiDiscovery, CiPeCaps, CiProfileList, FORGE_MUID, discovery_inquiry, parse_ci_discovery,
+    parse_ci_note, parse_ci_pe_caps, parse_ci_profiles, pe_capability_inquiry, profile_inquiry,
+};
 pub use midi1::{
     Midi1Parser, format_wire_hex, midi1_data_len, packed_short_from_ump, ump_from_packed_short,
     ump_from_status_data,
@@ -44,11 +48,12 @@ pub use midi1::{
 pub use midi2::{downscale_to_midi1, value32_to_7, velocity16_to_7};
 pub use mpe::{
     MPE_CONFIG_RPN, MpeTracker, MpeVoice, MpeZone, MpeZoneKind, PITCH_BEND_RANGE_RPN,
-    bend_semitones, mcm_packets,
+    bend_semitones, mcm_packets, pitch_bend_range_packets,
 };
 pub use nrpn::{NrpnTracker, ParamKind, ParamValue, rpn_name};
+pub use packs::{DumpPack, dump_packs, pack_dump};
 pub use panic::panic_packets;
-pub use profile::{PROFILE_VERSION, Profile, ProfileLink};
+pub use profile::{PROFILE_VERSION, Profile, ProfileLink, Scene};
 pub use route::{RouteEvent, RouteLog};
 pub use router::{Link, Router};
 pub use sysex::{

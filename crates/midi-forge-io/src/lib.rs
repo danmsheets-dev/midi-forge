@@ -19,7 +19,7 @@ pub use backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint, de
 pub use error::IoError;
 pub use null::NullBackend;
 pub use occupy::{explain_in_use, likely_midi_holders};
-pub use wms::{WmsStatus, probe_wms};
+pub use wms::{WmsStatus, create_wms_loopback, midi_cli_path, probe_wms};
 
 #[cfg(windows)]
 pub use winmm::{WinMmBackend, midisrv_running};

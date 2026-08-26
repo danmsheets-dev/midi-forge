@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use midi_forge_core::{
     ClockHealth, HangTracker, LiveView, MessageKind, MidiEvent, MonitorLog, MpeTracker,
-    NrpnTracker, PortId, Profile, ProfileLink, RouteEvent, RouteLog, Router, SysexAssembler,
+    NrpnTracker, PortId, Profile, ProfileLink, RouteEvent, RouteLog, Router, Scene, SysexAssembler,
     UmpMessage, decode, format_wire_hex, message_kind, panic_packets,
 };
 use midi_forge_io::{
@@ -75,6 +75,9 @@ pub struct MidiForgeApp {
     pub(crate) learn: Option<(PortId, PortId)>,
     pub(crate) always_on_top: bool,
     host_epoch: Instant,
+    pub(crate) scene_name: String,
+    pub(crate) scenes: Vec<Scene>,
+    pub(crate) pack_idx: usize,
 }
 
 impl MidiForgeApp {
@@ -139,6 +142,9 @@ impl MidiForgeApp {
             learn: None,
             always_on_top: false,
             host_epoch: Instant::now(),
+            scene_name: "Default".into(),
+            scenes: Vec::new(),
+            pack_idx: 0,
             throttle_ms: 0,
             throttle_q: HashMap::new(),
             throttle_at: HashMap::new(),
@@ -540,10 +546,60 @@ impl MidiForgeApp {
         let mut profile = Profile::new(links);
         profile.lua = self.script.source.clone();
         profile.lua_enabled = self.script.enabled();
+        profile.name = self.scene_name.clone();
+        profile.mute_clock = self.mute_clock;
+        profile.throttle_ms = self.throttle_ms;
+        profile.mpe_members = self.mpe_members;
+        profile.scenes = self.scenes.clone();
         profile
     }
 
+    fn capture_scene(&self) -> Scene {
+        self.to_profile().current_scene()
+    }
+
+    pub(crate) fn save_named_scene(&mut self) {
+        let mut scene = self.capture_scene();
+        scene.name = self.scene_name.trim().to_string();
+        if scene.name.is_empty() {
+            self.status = "Name the scene first".into();
+            return;
+        }
+        if let Some(existing) = self.scenes.iter_mut().find(|s| s.name == scene.name) {
+            *existing = scene;
+        } else {
+            self.scenes.push(scene);
+        }
+        self.status = format!("Scene '{}' saved ({})", self.scene_name, self.scenes.len());
+    }
+
+    pub(crate) fn recall_scene(&mut self, name: &str) {
+        let Some(scene) = self.scenes.iter().find(|s| s.name == name).cloned() else {
+            self.status = format!("No scene '{name}'");
+            return;
+        };
+        let mut profile = self.to_profile();
+        profile.apply_scene(&scene);
+        self.apply_profile(profile);
+        self.status = format!("Recalled scene '{name}'");
+    }
+
     fn apply_profile(&mut self, profile: Profile) {
+        self.mute_clock = profile.mute_clock;
+        self.throttle_ms = profile.throttle_ms.min(50);
+        self.mpe_members = if profile.mpe_members == 0 {
+            15
+        } else {
+            profile.mpe_members.min(15)
+        };
+        self.scene_name = if profile.name.is_empty() {
+            "Default".into()
+        } else {
+            profile.name.clone()
+        };
+        if !profile.scenes.is_empty() {
+            self.scenes = profile.scenes.clone();
+        }
         self.router.clear();
         self.selected_link = None;
         let mut loaded = 0usize;
@@ -628,6 +684,35 @@ impl eframe::App for MidiForgeApp {
                 }
                 if ui.button("Load").clicked() {
                     self.load_profile_dialog();
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.scene_name)
+                        .desired_width(90.0)
+                        .hint_text("Scene"),
+                );
+                let scene_names: Vec<String> = self.scenes.iter().map(|s| s.name.clone()).collect();
+                let mut pick = self.scene_name.clone();
+                egui::ComboBox::from_id_salt("scene_pick")
+                    .selected_text(if scene_names.is_empty() {
+                        "scenes".into()
+                    } else {
+                        pick.clone()
+                    })
+                    .width(80.0)
+                    .show_ui(ui, |ui| {
+                        for n in &scene_names {
+                            ui.selectable_value(&mut pick, n.clone(), n);
+                        }
+                    });
+                if pick != self.scene_name && scene_names.iter().any(|n| n == &pick) {
+                    self.recall_scene(&pick);
+                }
+                if ui
+                    .small_button("Save scene")
+                    .on_hover_text("Store current thru, Lua, mute clock, throttle as a named scene")
+                    .clicked()
+                {
+                    self.save_named_scene();
                 }
                 ui.separator();
                 if ui

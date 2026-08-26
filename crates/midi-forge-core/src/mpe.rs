@@ -143,6 +143,37 @@ impl MpeTracker {
         self.lower.is_some() || self.upper.is_some()
     }
 
+    /// Voices on typical member channels even if no MCM has been seen.
+    pub fn likely_mpe(&self) -> bool {
+        self.configured() || self.voices.iter().any(|v| v.channel > 0 && v.channel < 15)
+    }
+
+    pub fn mode_summary(&self) -> String {
+        if self.configured() {
+            let mut bits = Vec::new();
+            if let Some(z) = self.lower {
+                bits.push(format!("lower +{}", z.members));
+            }
+            if let Some(z) = self.upper {
+                bits.push(format!("upper +{}", z.members));
+            }
+            format!(
+                "MPE on ({})  note PB ±{}  master PB ±{}",
+                bits.join(", "),
+                self.note_pb_range,
+                self.master_pb_range
+            )
+        } else if self.likely_mpe() {
+            "No MCM — notes on member channels. Keyboard may already be in MPE; send Lower zone to confirm."
+                .into()
+        } else {
+            format!(
+                "Not in MPE (no MCM). Default PB ±{} / master ±{}",
+                self.note_pb_range, self.master_pb_range
+            )
+        }
+    }
+
     pub fn role(&self, channel: u8) -> &'static str {
         if self.lower.is_some_and(|z| z.is_master(channel)) {
             "Lower master"
@@ -331,6 +362,20 @@ pub fn mcm_packets(zone: MpeZoneKind, members: u8) -> Vec<UmpMessage> {
     ]
 }
 
+/// RPN 0 (pitch bend sensitivity) on `channel`. Data Entry MSB = semitones.
+pub fn pitch_bend_range_packets(channel: u8, semitones: u8) -> Vec<UmpMessage> {
+    let ch = channel & 0x0F;
+    let n = semitones.min(96);
+    let cc = |controller, value| UmpMessage::midi1_channel_voice(0, 0xB0 | ch, controller, value);
+    vec![
+        cc(CC_RPN_MSB, 0x00),
+        cc(CC_RPN_LSB, 0x00),
+        cc(CC_DATA_MSB, n),
+        cc(CC_RPN_MSB, 0x7F),
+        cc(CC_RPN_LSB, 0x7F),
+    ]
+}
+
 /// Convert 14-bit pitch bend to approximate semitones using the given range.
 pub fn bend_semitones(pitch_bend: u16, range: u8) -> f32 {
     let centered = i32::from(pitch_bend) - 8192;
@@ -451,5 +496,21 @@ mod tests {
         assert_eq!(pk[1].data2(), 6);
         assert_eq!(pk[2].data1(), 6);
         assert_eq!(pk[2].data2(), 3);
+    }
+
+    #[test]
+    fn mode_summary_and_pb_packets() {
+        let mut t = MpeTracker::new();
+        assert!(t.mode_summary().contains("Not in MPE"));
+        t.push(&note_on(3, 60, 100));
+        assert!(t.likely_mpe());
+        assert!(t.mode_summary().contains("No MCM"));
+        for p in mcm_packets(MpeZoneKind::Lower, 15) {
+            t.push(&p);
+        }
+        assert!(t.mode_summary().contains("MPE on"));
+        let pb = pitch_bend_range_packets(0, 2);
+        assert_eq!(pb[1].data2(), 0);
+        assert_eq!(pb[2].data2(), 2);
     }
 }

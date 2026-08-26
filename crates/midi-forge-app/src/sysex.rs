@@ -2,8 +2,9 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use midi_forge_core::{
-    FORGE_MUID, SysexAssembler, SysexDump, discovery_inquiry, dumps_from_hex, dumps_from_syx,
-    dumps_to_syx, hex_diff, parse_ci_discovery, parse_identity_reply,
+    FORGE_MUID, SysexAssembler, SysexDump, discovery_inquiry, dump_packs, dumps_from_hex,
+    dumps_from_syx, dumps_to_syx, hex_diff, pack_dump, parse_ci_note, parse_identity_reply,
+    pe_capability_inquiry, profile_inquiry,
 };
 use midi_forge_io::{Direction, EndpointId};
 
@@ -80,8 +81,8 @@ impl Librarian {
             if let Some(id) = parse_identity_reply(&dump) {
                 self.identity_note = id.summary();
                 self.identity_stem = id.file_stem();
-            } else if let Some(ci) = parse_ci_discovery(&dump) {
-                self.identity_note = ci.summary();
+            } else if let Some(note) = parse_ci_note(&dump) {
+                self.identity_note = note;
             }
             self.hex_edit = dump.to_hex();
             self.dumps.push(dump);
@@ -179,11 +180,47 @@ pub fn librarian_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         if ui.button("MIDI-CI").clicked() {
             midi_ci_discovery(app);
         }
+        if ui
+            .button("CI Profiles")
+            .on_hover_text("MIDI-CI Profile Configuration Inquiry")
+            .clicked()
+        {
+            send_ci(app, profile_inquiry(FORGE_MUID), "CI profile inquiry sent");
+        }
+        if ui
+            .button("CI PE")
+            .on_hover_text("MIDI-CI Property Exchange capability inquiry")
+            .clicked()
+        {
+            send_ci(app, pe_capability_inquiry(FORGE_MUID), "CI PE inquiry sent");
+        }
         if ui.button("Load .syx").clicked() {
             load_syx(app);
         }
         if ui.button("Save .syx").clicked() {
             save_syx(app);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Pack");
+        let packs = dump_packs();
+        if app.pack_idx >= packs.len() {
+            app.pack_idx = 0;
+        }
+        let label = packs.get(app.pack_idx).map(|p| p.name).unwrap_or("—");
+        egui::ComboBox::from_id_salt("dump_pack")
+            .selected_text(label)
+            .width(180.0)
+            .show_ui(ui, |ui| {
+                for (i, p) in packs.iter().enumerate() {
+                    ui.selectable_value(&mut app.pack_idx, i, p.name);
+                }
+            });
+        if let Some(p) = packs.get(app.pack_idx) {
+            ui.weak(p.blurb);
+            if ui.button("Send pack").clicked() {
+                send_ci(app, pack_dump(p), &format!("{} sent", p.name));
+            }
         }
     });
     if !app.librarian.identity_note.is_empty() {
@@ -500,6 +537,14 @@ fn start_wizard(app: &mut MidiForgeApp) {
 }
 
 fn midi_ci_discovery(app: &mut MidiForgeApp) {
+    send_ci(
+        app,
+        discovery_inquiry(FORGE_MUID),
+        "MIDI-CI discovery inquiry sent (broadcast MUID)",
+    );
+}
+
+fn send_ci(app: &mut MidiForgeApp, dump: SysexDump, ok: &str) {
     let Some(dest) = app.librarian.dest.clone() else {
         app.status = "Pick a SysEx output".into();
         return;
@@ -510,10 +555,9 @@ fn midi_ci_discovery(app: &mut MidiForgeApp) {
         return;
     }
     app.librarian.armed = true;
-    let dump = discovery_inquiry(FORGE_MUID);
     match app.send_sysex_now(&id, dump.bytes()) {
-        Ok(()) => app.status = "MIDI-CI discovery inquiry sent (broadcast MUID)".into(),
-        Err(err) => app.status = format!("MIDI-CI failed: {err}"),
+        Ok(()) => app.status = ok.into(),
+        Err(err) => app.status = format!("SysEx send failed: {err}"),
     }
 }
 
