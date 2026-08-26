@@ -114,6 +114,28 @@ impl UmpMessage {
     pub fn status_byte(&self) -> u8 {
         ((self.words[0] >> 16) & 0xFF) as u8
     }
+
+    pub fn data1(&self) -> u8 {
+        ((self.words[0] >> 8) & 0xFF) as u8
+    }
+
+    pub fn data2(&self) -> u8 {
+        (self.words[0] & 0xFF) as u8
+    }
+
+    /// MIDI 1.0 channel (0–15) for channel-voice packets.
+    pub fn channel(&self) -> Option<u8> {
+        (self.message_type() == 0x2).then_some(self.status_byte() & 0x0F)
+    }
+
+    /// Rewrite the MIDI 1.0 channel; other packet types are unchanged.
+    pub fn with_channel(mut self, channel: u8) -> Self {
+        if self.message_type() == 0x2 {
+            let status = (self.status_byte() & 0xF0) | (channel & 0x0F);
+            self.words[0] = (self.words[0] & 0xFF00_FFFF) | (u32::from(status) << 16);
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -174,5 +196,22 @@ mod tests {
         assert_eq!(msg.message_type(), 0x3);
         assert_eq!(msg.words()[0], 0x3004_7E7F);
         assert_eq!(msg.words()[1], 0x0601_0000);
+    }
+
+    #[test]
+    fn with_channel_rewrites_status_nibble() {
+        let msg = UmpMessage::midi1_channel_voice(0, 0x90, 60, 127).with_channel(3);
+        assert_eq!(msg.channel(), Some(3));
+        assert_eq!(msg.status_byte(), 0x93);
+        assert_eq!(msg.data1(), 60);
+        assert_eq!(msg.data2(), 127);
+        assert_eq!(msg.words()[0], 0x2093_3C7F);
+    }
+
+    #[test]
+    fn with_channel_ignores_clock() {
+        let clock = UmpMessage::midi1_system(0, 0xF8, 0, 0);
+        assert_eq!(clock.channel(), None);
+        assert_eq!(clock.with_channel(5), clock);
     }
 }
