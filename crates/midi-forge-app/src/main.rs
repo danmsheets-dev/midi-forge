@@ -1,5 +1,6 @@
 mod app;
 mod mpe;
+mod script;
 mod sysex;
 mod thru;
 

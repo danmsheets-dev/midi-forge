@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::filter::Filter;
 use crate::map::DataMap;
 
-pub const PROFILE_VERSION: u32 = 1;
+pub const PROFILE_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProfileLink {
@@ -20,6 +20,10 @@ pub struct Profile {
     pub version: u32,
     #[serde(default)]
     pub links: Vec<ProfileLink>,
+    #[serde(default)]
+    pub lua: String,
+    #[serde(default)]
+    pub lua_enabled: bool,
 }
 
 impl Profile {
@@ -27,6 +31,8 @@ impl Profile {
         Self {
             version: PROFILE_VERSION,
             links,
+            lua: String::new(),
+            lua_enabled: false,
         }
     }
 
@@ -60,5 +66,13 @@ mod tests {
         assert_eq!(loaded, profile);
         assert!(json.contains("winmm:in:0"));
         assert!(json.contains("offset"));
+    }
+
+    #[test]
+    fn v1_json_loads_with_empty_lua() {
+        let json = r#"{"version":1,"links":[]}"#;
+        let profile = Profile::from_json(json).unwrap();
+        assert!(profile.lua.is_empty());
+        assert!(!profile.lua_enabled);
     }
 }

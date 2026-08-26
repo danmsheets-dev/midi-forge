@@ -2,7 +2,7 @@
 
 Modern 64-bit MIDI diagnostic and routing utility (MIDI-OX successor). Rust engine, native Windows/macOS desktop first.
 
-Phase 6 treats UMP as a first-class wire format: MIDI 2.0 channel-voice decode in the monitor, downscale to MIDI 1 for WinMM send, a MidiSrv probe on Windows (`winmm+midisrv`), and a CoreMIDI backend with virtual ports on macOS. Native Windows MIDI Services `MidiSession` I/O waits on the App SDK projection.
+Phase 7 adds a sandboxed Lua 5.4 processor (`on_midi`) that can drop, rewrite, or fan out captured events before thru. The monitor still shows the raw wire. Scripts save with the JSON profile.
 
 ## Build
 
@@ -24,6 +24,8 @@ SysEx: arm receive on the right panel, or send **Identity request** to the selec
 
 MPE: the monitor shows zones (RPN 6) and live notes with bend/pressure/timbre (CC74). **Add cable** creates an in-app loopback on Windows (`forge:loop:*`, not visible to other programs) or a CoreMIDI virtual pair on macOS (other apps can see it). loopMIDI / MIDI Services ports still appear in the Windows endpoint list. When MidiSrv is running the banner shows **MidiSrv**.
 
+Lua: the right panel **Lua** tab. **Apply** compiles, **Enable** runs `on_midi` on capture before thru. `print` / `midi.log` go to the script log. `io` / `os` are not available.
+
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 
 ## Crates
@@ -32,6 +34,7 @@ Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every
 |-------|------|
 | `midi-forge-core` | UMP types, MIDI 1.0 parser, decode. No OS deps. |
 | `midi-forge-io` | `MidiBackend` trait, NullBackend, WinMM enumerate |
+| `midi-forge-script` | Sandboxed Lua 5.4 (`on_midi`) |
 | `midi-forge-app` | egui desktop shell (`midi-forge` binary) |
 
 Architecture: `docs/superpowers/specs/2026-08-26-midi-forge-architecture.md`  

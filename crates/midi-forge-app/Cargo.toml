@@ -13,5 +13,6 @@ path = "src/main.rs"
 [dependencies]
 midi-forge-core.workspace = true
 midi-forge-io.workspace = true
+midi-forge-script.workspace = true
 eframe.workspace = true
 rfd.workspace = true

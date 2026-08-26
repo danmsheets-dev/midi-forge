@@ -9,6 +9,7 @@ use midi_forge_core::{
 use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, default_backend};
 
 use crate::mpe;
+use crate::script::{self, RightTab};
 use crate::sysex::{self, Librarian};
 use crate::thru;
 
@@ -36,6 +37,8 @@ pub struct MidiForgeApp {
     pub(crate) mpe: MpeTracker,
     pub(crate) mpe_members: u8,
     pub(crate) cable_name: String,
+    pub(crate) script: midi_forge_script::ScriptEngine,
+    pub(crate) right_tab: RightTab,
 }
 
 impl MidiForgeApp {
@@ -71,6 +74,8 @@ impl MidiForgeApp {
             mpe: MpeTracker::new(),
             mpe_members: 15,
             cable_name: "Forge Cable".into(),
+            script: midi_forge_script::ScriptEngine::new(),
+            right_tab: RightTab::Sysex,
         };
 
         let inputs: Vec<EndpointId> = app
@@ -172,22 +177,25 @@ impl MidiForgeApp {
         for event in &events {
             self.mpe.push(&event.packet);
             self.librarian.on_packet(&event.packet);
-            for routed in self.router.route(event) {
-                let Some(dest) = self.endpoint_by_port.get(&routed.port).cloned() else {
-                    continue;
-                };
-                if !self.open_outputs.contains(&dest.0) {
-                    continue;
-                }
-                if routed.packet.message_type() == 0x3 {
-                    let asm = self.thru_sysex.entry(dest.0.clone()).or_default();
-                    if let Some(dump) = asm.push(&routed.packet)
-                        && let Err(err) = self.backend.send_sysex(&dest, dump.bytes())
-                    {
+            let processed = self.script.process(event);
+            for event in &processed {
+                for routed in self.router.route(event) {
+                    let Some(dest) = self.endpoint_by_port.get(&routed.port).cloned() else {
+                        continue;
+                    };
+                    if !self.open_outputs.contains(&dest.0) {
+                        continue;
+                    }
+                    if routed.packet.message_type() == 0x3 {
+                        let asm = self.thru_sysex.entry(dest.0.clone()).or_default();
+                        if let Some(dump) = asm.push(&routed.packet)
+                            && let Err(err) = self.backend.send_sysex(&dest, dump.bytes())
+                        {
+                            self.port_errors.insert(dest.0, err.to_string());
+                        }
+                    } else if let Err(err) = self.backend.send(&dest, &routed.packet) {
                         self.port_errors.insert(dest.0, err.to_string());
                     }
-                } else if let Err(err) = self.backend.send(&dest, &routed.packet) {
-                    self.port_errors.insert(dest.0, err.to_string());
                 }
             }
         }
@@ -256,7 +264,10 @@ impl MidiForgeApp {
                 })
             })
             .collect();
-        Profile::new(links)
+        let mut profile = Profile::new(links);
+        profile.lua = self.script.source.clone();
+        profile.lua_enabled = self.script.enabled();
+        profile
     }
 
     fn apply_profile(&mut self, profile: Profile) {
@@ -287,6 +298,7 @@ impl MidiForgeApp {
                 }
             }
         }
+        script::apply_profile_lua(self, profile.lua, profile.lua_enabled);
         self.status = format!("Loaded {loaded} thru links ({skipped} skipped)");
     }
 
@@ -336,7 +348,7 @@ impl eframe::App for MidiForgeApp {
             ui.horizontal(|ui| {
                 ui.heading("Midi-Forge");
                 ui.separator();
-                ui.label("Phase 6 — UMP + CoreMIDI");
+                ui.label("Phase 7 — Lua");
                 ui.separator();
                 if ui.button("Save").clicked() {
                     self.save_profile_dialog();
@@ -367,6 +379,9 @@ impl eframe::App for MidiForgeApp {
                 ui.separator();
                 ui.label(format!("{} events", self.log.len()));
                 ui.weak(format!("{} thru", self.router.links().len()));
+                if self.script.enabled() {
+                    ui.colored_label(egui::Color32::from_rgb(80, 180, 140), "Lua");
+                }
                 if self.dropped > 0 {
                     ui.colored_label(
                         egui::Color32::from_rgb(220, 140, 40),
@@ -444,7 +459,25 @@ impl eframe::App for MidiForgeApp {
             .default_size(360.0)
             .resizable(true)
             .show(ui, |ui| {
-                sysex::librarian_panel(ui, self);
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(self.right_tab == RightTab::Sysex, "SysEx")
+                        .clicked()
+                    {
+                        self.right_tab = RightTab::Sysex;
+                    }
+                    if ui
+                        .selectable_label(self.right_tab == RightTab::Lua, "Lua")
+                        .clicked()
+                    {
+                        self.right_tab = RightTab::Lua;
+                    }
+                });
+                ui.separator();
+                match self.right_tab {
+                    RightTab::Sysex => sysex::librarian_panel(ui, self),
+                    RightTab::Lua => script::lua_panel(ui, self),
+                }
             });
 
         egui::Panel::bottom("thru")

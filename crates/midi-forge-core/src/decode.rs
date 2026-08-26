@@ -205,6 +205,32 @@ impl Decoded {
             } => format!("UMP type {message_type:#X} status {status:#04X}"),
         }
     }
+
+    /// Stable Lua/script key for this packet.
+    pub fn kind_key(&self) -> &'static str {
+        match self {
+            Self::NoteOn { .. } => "note_on",
+            Self::NoteOff { .. } => "note_off",
+            Self::ControlChange { .. } => "cc",
+            Self::PolyPressure { .. } => "poly_pressure",
+            Self::ProgramChange { .. } => "program",
+            Self::ChannelPressure { .. } => "channel_pressure",
+            Self::PitchBend { .. } => "pitch_bend",
+            Self::Clock { .. } => "clock",
+            Self::Start { .. } => "start",
+            Self::Stop { .. } => "stop",
+            Self::Continue { .. } => "continue",
+            Self::Sysex7 { .. } => "sysex",
+            Self::Midi2NoteOn { .. } => "m2_note_on",
+            Self::Midi2NoteOff { .. } => "m2_note_off",
+            Self::Midi2ControlChange { .. } => "m2_cc",
+            Self::Midi2PolyPressure { .. } => "m2_poly_pressure",
+            Self::Midi2ProgramChange { .. } => "m2_program",
+            Self::Midi2ChannelPressure { .. } => "m2_channel_pressure",
+            Self::Midi2PitchBend { .. } => "m2_pitch_bend",
+            Self::Other { .. } => "other",
+        }
+    }
 }
 
 pub fn decode(msg: &UmpMessage) -> Decoded {
@@ -387,6 +413,7 @@ mod tests {
             }
         );
         assert_eq!(decode(&msg).summary(), "Ch1 NoteOn 60 vel 127");
+        assert_eq!(decode(&msg).kind_key(), "note_on");
     }
 
     #[test]

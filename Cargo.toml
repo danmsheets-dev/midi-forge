@@ -4,6 +4,7 @@ members = [
     "crates/midi-forge-core",
     "crates/midi-forge-io",
     "crates/midi-forge-app",
+    "crates/midi-forge-script",
 ]
 
 [workspace.package]
@@ -16,6 +17,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 midi-forge-core = { path = "crates/midi-forge-core" }
 midi-forge-io = { path = "crates/midi-forge-io" }
+midi-forge-script = { path = "crates/midi-forge-script" }
 thiserror = "2.0.20"
 eframe = "0.36.1"
 serde = { version = "1.0.228", features = ["derive"] }
