@@ -19,12 +19,12 @@ fn main() -> eframe::Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_title("Midi-Forge"),
+            .with_title("Midi-Forge 0.1 Beta"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Midi-Forge",
+        "Midi-Forge 0.1 Beta",
         options,
         Box::new(|cc| Ok(Box::new(app::MidiForgeApp::new(cc)))),
     )

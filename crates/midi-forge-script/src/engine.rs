@@ -259,14 +259,33 @@ fn values_to_events(
     Ok(out)
 }
 
+fn lua_u8(table: &Table, key: &str, fallback: u8) -> Result<u8, mlua::Error> {
+    Ok(match table.get::<Option<Value>>(key)? {
+        None | Some(Value::Nil) => fallback,
+        Some(Value::Integer(i)) => i.clamp(0, 255) as u8,
+        Some(Value::Number(n)) if n.is_finite() => n.round().clamp(0.0, 255.0) as u8,
+        Some(_) => fallback,
+    })
+}
+
+fn lua_u32(table: &Table, key: &str, fallback: u32) -> Result<u32, mlua::Error> {
+    Ok(match table.get::<Option<Value>>(key)? {
+        None | Some(Value::Nil) => fallback,
+        Some(Value::Integer(i)) => i.max(0) as u32,
+        Some(Value::Number(n)) if n.is_finite() => n.round().max(0.0) as u32,
+        Some(_) => fallback,
+    })
+}
+
 fn table_to_event(table: &Table, fallback: &MidiEvent) -> Result<MidiEvent, ScriptError> {
-    let port = table.get::<Option<u32>>("port")?.unwrap_or(fallback.port.0);
-    let time = table
-        .get::<Option<u64>>("time")?
-        .unwrap_or(fallback.time.nanos);
-    let mt = table
-        .get::<Option<u8>>("type")?
-        .unwrap_or(fallback.packet.message_type());
+    let port = lua_u32(table, "port", fallback.port.0)?;
+    let time = match table.get::<Option<Value>>("time")? {
+        None | Some(Value::Nil) => fallback.time.nanos,
+        Some(Value::Integer(i)) => i.max(0) as u64,
+        Some(Value::Number(n)) if n.is_finite() => n.round().max(0.0) as u64,
+        Some(_) => fallback.time.nanos,
+    };
+    let mt = lua_u8(table, "type", fallback.packet.message_type())?;
     if mt == 0x3 {
         if let Some(words) = sequence_u32(table, "words")?
             && let Ok(packet) = UmpMessage::try_from_words(&words)
@@ -279,18 +298,10 @@ fn table_to_event(table: &Table, fallback: &MidiEvent) -> Result<MidiEvent, Scri
         }
         return Ok(*fallback);
     }
-    let group = table
-        .get::<Option<u8>>("group")?
-        .unwrap_or(fallback.packet.group());
-    let status = table
-        .get::<Option<u8>>("status")?
-        .unwrap_or(fallback.packet.status_byte());
-    let data1 = table
-        .get::<Option<u8>>("data1")?
-        .unwrap_or(fallback.packet.data1());
-    let data2 = table
-        .get::<Option<u8>>("data2")?
-        .unwrap_or(fallback.packet.data2());
+    let group = lua_u8(table, "group", fallback.packet.group())?;
+    let status = lua_u8(table, "status", fallback.packet.status_byte())?;
+    let data1 = lua_u8(table, "data1", fallback.packet.data1())?;
+    let data2 = lua_u8(table, "data2", fallback.packet.data2())?;
     let packet = if mt == 0x4 {
         let w1 = table
             .get::<Option<u32>>("word1")?
@@ -400,6 +411,19 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].packet.data1(), 72);
         assert_eq!(out[0].packet.data2(), 100);
+    }
+
+    #[test]
+    fn math_min_float_still_rewrites() {
+        let mut e = load(
+            r#"
+            function on_midi(ev)
+              ev.data1 = math.min(127, ev.data1 + 12)
+              return ev
+            end
+            "#,
+        );
+        assert_eq!(e.process(&note())[0].packet.data1(), 72);
     }
 
     #[test]

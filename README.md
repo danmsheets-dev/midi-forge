@@ -1,8 +1,8 @@
 # Midi-Forge
 
-Modern 64-bit MIDI diagnostic and routing utility (MIDI-OX successor). Rust engine, native Windows/macOS desktop first.
+**0.1 Beta** — modern 64-bit MIDI diagnostic and routing utility (MIDI-OX successor). Rust engine, native Windows/macOS desktop first.
 
-Phase 7 adds a sandboxed Lua 5.4 processor (`on_midi`) that can drop, rewrite, or fan out captured events before thru. The monitor still shows the raw wire. Scripts save with the JSON profile.
+Lua 5.4 can drop, rewrite, or fan out captured events before thru. The monitor still shows the raw wire. Scripts save with the JSON profile.
 
 ## Build
 

@@ -198,6 +198,9 @@ impl MpeTracker {
 
     fn note_on(&mut self, ch: u8, note: u8, vel: u8) {
         self.voices.retain(|v| !(v.channel == ch && v.note == note));
+        if self.voices.len() >= 128 {
+            self.voices.remove(0);
+        }
         let e = self.expr[usize::from(ch)];
         self.voices.push(MpeVoice {
             channel: ch,
@@ -407,6 +410,15 @@ mod tests {
         t.push(&cc(2, 100, 0));
         t.push(&cc(2, 6, 48));
         assert_eq!(t.note_pitch_bend_range(), 48);
+    }
+
+    #[test]
+    fn voices_capped_at_128() {
+        let mut t = MpeTracker::new();
+        for i in 0..200u16 {
+            t.push(&note_on((i % 16) as u8, (i / 16) as u8, 100));
+        }
+        assert_eq!(t.voices().len(), 128);
     }
 
     #[test]

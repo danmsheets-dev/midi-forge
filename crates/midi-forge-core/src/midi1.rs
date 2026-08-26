@@ -208,6 +208,7 @@ pub fn format_wire_hex(msg: &UmpMessage) -> String {
         0x3 => {
             let w0 = msg.words()[0];
             let w1 = msg.words().get(1).copied().unwrap_or(0);
+            let status = ((w0 >> 20) & 0xF) as u8;
             let count = ((w0 >> 16) & 0xF) as usize;
             let bytes = [
                 ((w0 >> 8) & 0xFF) as u8,
@@ -223,10 +224,13 @@ pub fn format_wire_hex(msg: &UmpMessage) -> String {
                 .map(|b| format!("{b:02X}"))
                 .collect::<Vec<_>>()
                 .join(" ");
-            if payload.is_empty() {
-                "F0 F7".into()
-            } else {
-                format!("F0 {payload} F7")
+            match status {
+                0 if payload.is_empty() => "F0 F7".into(),
+                0 => format!("F0 {payload} F7"),
+                1 => format!("F0 {payload} …"),
+                2 => format!("… {payload} …"),
+                3 => format!("… {payload} F7"),
+                _ => format!("SysEx7 {payload}"),
             }
         }
         _ => msg
@@ -334,5 +338,15 @@ mod tests {
     fn program_change_hex_omits_second_data_byte() {
         let msg = ump_from_status_data(0xC3, 12, 0);
         assert_eq!(format_wire_hex(&msg), "C3 0C");
+    }
+
+    #[test]
+    fn sysex_hex_does_not_fake_f7_on_start_chunk() {
+        let start = UmpMessage::sysex7(0, 1, &[1, 2, 3, 4, 5, 6]);
+        let end = UmpMessage::sysex7(0, 3, &[7, 8]);
+        let complete = UmpMessage::sysex7(0, 0, &[0x7E, 0x7F, 0x06, 0x01]);
+        assert_eq!(format_wire_hex(&start), "F0 01 02 03 04 05 06 …");
+        assert_eq!(format_wire_hex(&end), "… 07 08 F7");
+        assert_eq!(format_wire_hex(&complete), "F0 7E 7F 06 01 F7");
     }
 }

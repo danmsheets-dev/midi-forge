@@ -242,6 +242,44 @@ impl MidiForgeApp {
         self.endpoints = self.backend.endpoints().to_vec();
     }
 
+    pub(crate) fn refresh_devices(&mut self) {
+        let open_ins: Vec<String> = self.open_inputs.iter().cloned().collect();
+        let open_outs: Vec<String> = self.open_outputs.iter().cloned().collect();
+        for id in &open_ins {
+            let _ = self.set_input_open(&EndpointId(id.clone()), false);
+        }
+        for id in &open_outs {
+            let _ = self.set_output_open(&EndpointId(id.clone()), false);
+        }
+        match self.backend.refresh() {
+            Ok(()) => {
+                self.status.clear();
+                self.port_errors.clear();
+            }
+            Err(err) => self.status = err.to_string(),
+        }
+        self.backend_name = self.backend.name().to_string();
+        self.sync_endpoints();
+        let known: HashSet<String> = self.endpoints.iter().map(|e| e.id.0.clone()).collect();
+        for id in open_ins {
+            if known.contains(&id)
+                && let Err(err) = self.set_input_open(&EndpointId(id.clone()), true)
+            {
+                self.port_errors.insert(id, err);
+            }
+        }
+        for id in open_outs {
+            if known.contains(&id)
+                && let Err(err) = self.set_output_open(&EndpointId(id.clone()), true)
+            {
+                self.port_errors.insert(id, err);
+            }
+        }
+        if self.status.is_empty() {
+            self.status = format!("{} endpoint(s)", self.endpoints.len());
+        }
+    }
+
     pub(crate) fn send_packet(
         &mut self,
         id: &EndpointId,
@@ -348,7 +386,7 @@ impl eframe::App for MidiForgeApp {
             ui.horizontal(|ui| {
                 ui.heading("Midi-Forge");
                 ui.separator();
-                ui.label("Phase 7 — Lua");
+                ui.label("0.1 Beta");
                 ui.separator();
                 if ui.button("Save").clicked() {
                     self.save_profile_dialog();
@@ -412,7 +450,16 @@ impl eframe::App for MidiForgeApp {
         egui::Panel::left("ports")
             .default_size(340.0)
             .show(ui, |ui| {
-                ui.heading("Endpoints");
+                ui.horizontal(|ui| {
+                    ui.heading("Endpoints");
+                    if ui
+                        .small_button("Refresh")
+                        .on_hover_text("Re-scan MIDI devices")
+                        .clicked()
+                    {
+                        self.refresh_devices();
+                    }
+                });
                 ui.weak("Check an output to open it. Thru cells open both ends.");
                 ui.separator();
                 let endpoints = self.endpoints.clone();

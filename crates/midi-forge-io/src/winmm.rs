@@ -24,7 +24,7 @@ const CALLBACK_FUNCTION: u32 = 0x0003_0000;
 const MIM_DATA: u32 = 0x3C3;
 const MIM_LONGDATA: u32 = 0x3C4;
 const SYSEX_BUFFERS: usize = 8;
-const SYSEX_CAP: usize = 1024;
+const SYSEX_CAP: usize = 16 * 1024;
 const QUEUE_CAP: usize = 4096;
 const MHDR_DONE: u32 = 0x0000_0001;
 const SYSEX_SEND_TIMEOUT: Duration = Duration::from_secs(5);
@@ -113,24 +113,22 @@ unsafe extern "system" {
         flags: u32,
     ) -> u32;
     fn midiOutClose(handle: usize) -> u32;
+    fn midiOutReset(handle: usize) -> u32;
     fn midiOutShortMsg(handle: usize, msg: u32) -> u32;
     fn midiOutPrepareHeader(handle: usize, header: *mut MidiHdr, size: u32) -> u32;
     fn midiOutLongMsg(handle: usize, header: *mut MidiHdr, size: u32) -> u32;
     fn midiOutUnprepareHeader(handle: usize, header: *mut MidiHdr, size: u32) -> u32;
 }
 
-#[derive(Clone, Copy)]
 struct CaptureFrame {
     time_ms: u32,
     port: PortId,
     kind: FrameKind,
 }
 
-#[derive(Clone, Copy)]
-#[allow(clippy::large_enum_variant)] // Copy SysEx bytes; WinMM callback must not allocate.
 enum FrameKind {
     Short(u32),
-    SysEx { len: u16, buf: [u8; SYSEX_CAP] },
+    SysEx(Vec<u8>),
 }
 
 struct InputShared {
@@ -348,9 +346,9 @@ impl MidiBackend for WinMmBackend {
                         ump_from_packed_short(packed),
                     ));
                 }
-                FrameKind::SysEx { len, buf } => {
+                FrameKind::SysEx(buf) => {
                     let parser = self.parsers.entry(frame.port).or_default();
-                    let packets = parser.push_slice(&buf[..usize::from(len)]);
+                    let packets = parser.push_slice(&buf);
                     for packet in packets {
                         out.push(MidiEvent::new(time, frame.port, packet));
                     }
@@ -432,6 +430,7 @@ fn send_long_message(handle: usize, bytes: &[u8]) -> Result<(), IoError> {
     while hdr.flags & MHDR_DONE == 0 {
         if Instant::now() > deadline {
             unsafe {
+                midiOutReset(handle);
                 midiOutUnprepareHeader(handle, hdr.as_mut(), hdr_size);
             }
             return Err(IoError::Backend("SysEx send timed out".into()));
@@ -488,24 +487,21 @@ unsafe extern "system" fn midi_in_callback(
         }
         MIM_LONGDATA if param1 != 0 => {
             let hdr = unsafe { &*(param1 as *const MidiHdr) };
-            let mut buf = [0u8; SYSEX_CAP];
             let len = (hdr.bytes_recorded as usize).min(SYSEX_CAP);
             if !hdr.lp_data.is_null() && len > 0 {
+                let mut buf = vec![0u8; len];
                 unsafe {
-                    buf[..len].copy_from_slice(std::slice::from_raw_parts(hdr.lp_data, len));
+                    buf.copy_from_slice(std::slice::from_raw_parts(hdr.lp_data, len));
                 }
-            }
-            push_frame(
-                shared,
-                CaptureFrame {
-                    time_ms: param2 as u32,
-                    port: shared.port,
-                    kind: FrameKind::SysEx {
-                        len: len as u16,
-                        buf,
+                push_frame(
+                    shared,
+                    CaptureFrame {
+                        time_ms: param2 as u32,
+                        port: shared.port,
+                        kind: FrameKind::SysEx(buf),
                     },
-                },
-            );
+                );
+            }
             if shared.live.load(Ordering::Acquire) {
                 unsafe {
                     midiInAddBuffer(handle, param1 as *mut MidiHdr, size_of::<MidiHdr>() as u32);
@@ -540,7 +536,7 @@ fn enumerate() -> Result<Vec<Endpoint>, IoError> {
         let rc =
             unsafe { midiInGetDevCapsW(i as usize, &mut caps, size_of::<MidiInCapsW>() as u32) };
         if rc != MMSYSERR_NOERROR {
-            return Err(mm_error(rc, &format!("midiInGetDevCapsW({i})")));
+            continue;
         }
         endpoints.push(Endpoint {
             id: EndpointId(format!("winmm:in:{i}")),
@@ -566,7 +562,7 @@ fn enumerate() -> Result<Vec<Endpoint>, IoError> {
         let rc =
             unsafe { midiOutGetDevCapsW(i as usize, &mut caps, size_of::<MidiOutCapsW>() as u32) };
         if rc != MMSYSERR_NOERROR {
-            return Err(mm_error(rc, &format!("midiOutGetDevCapsW({i})")));
+            continue;
         }
         endpoints.push(Endpoint {
             id: EndpointId(format!("winmm:out:{i}")),
