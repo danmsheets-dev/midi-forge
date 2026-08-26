@@ -17,7 +17,7 @@ pub enum VoiceKind {
 
 impl VoiceKind {
     pub fn from_packet(msg: &UmpMessage) -> Option<Self> {
-        if msg.message_type() != 0x2 {
+        if !matches!(msg.message_type(), 0x2 | 0x4) {
             return None;
         }
         Some(match msg.status_byte() & 0xF0 {
@@ -185,8 +185,12 @@ impl Matcher {
         {
             return false;
         }
-        let d1 = packet.data1();
-        let d2 = packet.data2();
+        let (d1, d2) = if packet.message_type() == 0x4 {
+            let m1 = crate::midi2::downscale_to_midi1(packet);
+            (m1.data1(), m1.data2())
+        } else {
+            (packet.data1(), packet.data2())
+        };
         in_range(d1, self.data1_min, self.data1_max) && in_range(d2, self.data2_min, self.data2_max)
     }
 }
@@ -223,11 +227,16 @@ impl MapAction {
                 data1,
                 data2,
             } => {
-                let src_kind = VoiceKind::from_packet(packet)?;
+                let src = if packet.message_type() == 0x4 {
+                    crate::midi2::downscale_to_midi1(packet)
+                } else {
+                    *packet
+                };
+                let src_kind = VoiceKind::from_packet(&src)?;
                 let out_kind = kind.unwrap_or(src_kind);
-                let ch = channel.unwrap_or_else(|| packet.channel().unwrap_or(0)) & 0x0F;
-                let d1 = data1.apply(packet.data1());
-                let d2 = data2.apply(packet.data2());
+                let ch = channel.unwrap_or_else(|| src.channel().unwrap_or(0)) & 0x0F;
+                let d1 = data1.apply(src.data1());
+                let d2 = data2.apply(src.data2());
                 let status = out_kind.status_nibble() | ch;
                 Some(UmpMessage::midi1_channel_voice(
                     packet.group(),
@@ -476,5 +485,15 @@ mod tests {
         assert_eq!(map.apply(&cc(1, 1)), Some(cc(1, 1)));
         assert_eq!(map.apply(&note_on(60, 1)), None);
         assert_eq!(map.apply(&clock()), Some(clock()));
+    }
+
+    #[test]
+    fn midi2_note_transpose_emits_midi1() {
+        let map = DataMap::transpose(2);
+        let m2 = UmpMessage::midi2_channel_voice(0, 0x90, 60, 0, 0xFFFF_0000);
+        let out = map.apply(&m2).expect("mapped");
+        assert_eq!(out.message_type(), 0x2);
+        assert_eq!(out.data1(), 62);
+        assert_eq!(out.data2(), 127);
     }
 }

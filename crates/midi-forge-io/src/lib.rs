@@ -9,9 +9,16 @@ mod null;
 #[cfg(windows)]
 mod winmm;
 
+#[cfg(target_os = "macos")]
+#[path = "coremidi.rs"]
+mod coremidi_backend;
+
 pub use backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint, default_backend};
 pub use error::IoError;
 pub use null::NullBackend;
 
 #[cfg(windows)]
-pub use winmm::WinMmBackend;
+pub use winmm::{WinMmBackend, midisrv_running};
+
+#[cfg(target_os = "macos")]
+pub use coremidi_backend::CoreMidiBackend;

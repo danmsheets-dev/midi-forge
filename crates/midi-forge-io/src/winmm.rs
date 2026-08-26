@@ -8,8 +8,8 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::time::{Duration, Instant};
 
 use midi_forge_core::{
-    Midi1Parser, MidiEvent, PortId, Timestamp, UmpMessage, packed_short_from_ump,
-    ump_from_packed_short,
+    Midi1Parser, MidiEvent, PortId, Timestamp, UmpMessage, downscale_to_midi1,
+    packed_short_from_ump, ump_from_packed_short,
 };
 
 use crate::backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint};
@@ -205,7 +205,11 @@ impl Drop for WinMmBackend {
 
 impl MidiBackend for WinMmBackend {
     fn name(&self) -> &'static str {
-        "winmm"
+        if midisrv_running() {
+            "winmm+midisrv"
+        } else {
+            "winmm"
+        }
     }
 
     fn refresh(&mut self) -> Result<(), IoError> {
@@ -364,7 +368,8 @@ impl MidiBackend for WinMmBackend {
         let Some(output) = self.outputs.get(&id.0) else {
             return Err(IoError::NotFound(id.0.clone()));
         };
-        let packed = packed_short_from_ump(packet).ok_or(IoError::UnsupportedPacket)?;
+        let packet = downscale_to_midi1(packet);
+        let packed = packed_short_from_ump(&packet).ok_or(IoError::UnsupportedPacket)?;
         let rc = unsafe { midiOutShortMsg(output.handle, packed) };
         if rc != MMSYSERR_NOERROR {
             return Err(mm_error(rc, &format!("midiOutShortMsg {}", id.0)));
@@ -592,6 +597,57 @@ fn utf16_name(raw: &[u16]) -> String {
     String::from_utf16_lossy(&raw[..end])
 }
 
+/// True when the Windows MIDI Services process (`MidiSrv`) is installed and running.
+/// UMP I/O still needs the App SDK; WinMM is remapped through the service when this is true.
+pub fn midisrv_running() -> bool {
+    midisrv_running_named("MidiSrv") || midisrv_running_named("Midisrv")
+}
+
+fn midisrv_running_named(name: &str) -> bool {
+    let mut wide: Vec<u16> = name.encode_utf16().collect();
+    wide.push(0);
+    unsafe {
+        let scm = OpenSCManagerW(ptr::null(), ptr::null(), SC_MANAGER_CONNECT);
+        if scm == 0 {
+            return false;
+        }
+        let svc = OpenServiceW(scm, wide.as_ptr(), SERVICE_QUERY_STATUS);
+        if svc == 0 {
+            CloseServiceHandle(scm);
+            return false;
+        }
+        let mut status = ServiceStatus::default();
+        let ok = QueryServiceStatus(svc, &mut status) != 0;
+        CloseServiceHandle(svc);
+        CloseServiceHandle(scm);
+        ok && status.current_state == SERVICE_RUNNING
+    }
+}
+
+const SC_MANAGER_CONNECT: u32 = 0x0001;
+const SERVICE_QUERY_STATUS: u32 = 0x0004;
+const SERVICE_RUNNING: u32 = 0x0000_0004;
+
+#[repr(C)]
+#[derive(Default)]
+struct ServiceStatus {
+    service_type: u32,
+    current_state: u32,
+    controls_accepted: u32,
+    win32_exit_code: u32,
+    service_specific_exit_code: u32,
+    check_point: u32,
+    wait_hint: u32,
+}
+
+#[link(name = "advapi32")]
+unsafe extern "system" {
+    fn OpenSCManagerW(machine: *const u16, database: *const u16, access: u32) -> isize;
+    fn OpenServiceW(manager: isize, name: *const u16, access: u32) -> isize;
+    fn CloseServiceHandle(handle: isize) -> i32;
+    fn QueryServiceStatus(service: isize, status: *mut ServiceStatus) -> i32;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -599,5 +655,10 @@ mod tests {
     #[test]
     fn midihdr_layout_is_120_bytes() {
         assert_eq!(size_of::<MidiHdr>(), 120);
+    }
+
+    #[test]
+    fn midisrv_probe_does_not_panic() {
+        let _ = midisrv_running();
     }
 }

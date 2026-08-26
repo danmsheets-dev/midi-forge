@@ -336,7 +336,7 @@ impl eframe::App for MidiForgeApp {
             ui.horizontal(|ui| {
                 ui.heading("Midi-Forge");
                 ui.separator();
-                ui.label("Phase 5 — MPE + virtual cables");
+                ui.label("Phase 6 — UMP + CoreMIDI");
                 ui.separator();
                 if ui.button("Save").clicked() {
                     self.save_profile_dialog();
@@ -377,6 +377,15 @@ impl eframe::App for MidiForgeApp {
                     ui.weak(format!("{} evicted", self.log.evicted()));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if self.backend_name.contains("midisrv") {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(80, 180, 140),
+                            "MidiSrv",
+                        )
+                        .on_hover_text(
+                            "Windows MIDI Services is running. WinMM sees MIDI 1 views of UMP devices. Native MidiSession I/O is a later phase.",
+                        );
+                    }
                     ui.weak(format!("backend: {}", self.backend_name));
                 });
             });
@@ -414,7 +423,10 @@ impl eframe::App for MidiForgeApp {
                                     }
                                 }
                                 ui.vertical(|ui| {
-                                    ui.strong(&ep.name);
+                                    ui.horizontal(|ui| {
+                                        ui.strong(&ep.name);
+                                        ui.weak(ep.protocol.label());
+                                    });
                                     ui.monospace(&ep.id.0);
                                     ui.label(direction_label(ep.direction));
                                 });

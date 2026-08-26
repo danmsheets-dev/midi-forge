@@ -131,7 +131,7 @@ fn send_mcm(app: &mut MidiForgeApp, zone: MpeZoneKind) {
 pub fn virtual_cables_ui(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     ui.separator();
     ui.heading("Virtual cables");
-    ui.weak("App-local loopbacks. DAWs see loopMIDI / MIDI Services ports already listed above.");
+    ui.weak("Windows: app-local (DAWs see loopMIDI / MidiSrv). macOS: CoreMIDI virtual ports other apps can see.");
     ui.horizontal(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut app.cable_name)
@@ -145,7 +145,10 @@ pub fn virtual_cables_ui(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     let forge: Vec<EndpointId> = app
         .endpoints
         .iter()
-        .filter(|e| e.id.0.starts_with("forge:loop:") && e.direction == Direction::Input)
+        .filter(|e| {
+            e.direction == Direction::Input
+                && (e.id.0.starts_with("forge:loop:") || e.id.0.starts_with("coremidi:vd:"))
+        })
         .map(|e| e.id.clone())
         .collect();
     for id in forge {
@@ -182,6 +185,8 @@ fn remove_cable(app: &mut MidiForgeApp, id: &EndpointId) {
     if let Some(out) = id.0.strip_suffix(":in") {
         let out_id = EndpointId(format!("{out}:out"));
         let _ = app.set_output_open(&out_id, false);
+    } else if let Some(idx) = id.0.strip_prefix("coremidi:vd:") {
+        let _ = app.set_output_open(&EndpointId(format!("coremidi:vs:{idx}")), false);
     }
     match app.backend.remove_loopback(id) {
         Ok(()) => {

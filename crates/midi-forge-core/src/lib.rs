@@ -10,6 +10,7 @@ mod filter;
 mod log;
 mod map;
 mod midi1;
+mod midi2;
 mod mpe;
 mod panic;
 mod profile;
@@ -27,6 +28,7 @@ pub use midi1::{
     Midi1Parser, format_wire_hex, midi1_data_len, packed_short_from_ump, ump_from_packed_short,
     ump_from_status_data,
 };
+pub use midi2::{downscale_to_midi1, value32_to_7, velocity16_to_7};
 pub use mpe::{
     MPE_CONFIG_RPN, MpeTracker, MpeVoice, MpeZone, MpeZoneKind, PITCH_BEND_RANGE_RPN,
     bend_semitones, mcm_packets,

@@ -61,6 +61,48 @@ pub enum Decoded {
         count: u8,
         data: [u8; 6],
     },
+    Midi2NoteOn {
+        group: u8,
+        channel: u8,
+        note: u8,
+        velocity: u16,
+    },
+    Midi2NoteOff {
+        group: u8,
+        channel: u8,
+        note: u8,
+        velocity: u16,
+    },
+    Midi2ControlChange {
+        group: u8,
+        channel: u8,
+        controller: u8,
+        value: u32,
+    },
+    Midi2PolyPressure {
+        group: u8,
+        channel: u8,
+        note: u8,
+        pressure: u32,
+    },
+    Midi2ProgramChange {
+        group: u8,
+        channel: u8,
+        program: u8,
+        bank_msb: u8,
+        bank_lsb: u8,
+        bank_valid: bool,
+    },
+    Midi2ChannelPressure {
+        group: u8,
+        channel: u8,
+        pressure: u32,
+    },
+    Midi2PitchBend {
+        group: u8,
+        channel: u8,
+        value: u32,
+    },
     Other {
         message_type: u8,
         group: u8,
@@ -109,6 +151,53 @@ impl Decoded {
             Self::Stop { .. } => "Stop".to_string(),
             Self::Continue { .. } => "Continue".to_string(),
             Self::Sysex7 { count, .. } => format!("SysEx7 {count} bytes"),
+            Self::Midi2NoteOn {
+                channel,
+                note,
+                velocity,
+                ..
+            } => format!("Ch{} M2 NoteOn {note} vel16 {velocity}", channel + 1),
+            Self::Midi2NoteOff {
+                channel,
+                note,
+                velocity,
+                ..
+            } => format!("Ch{} M2 NoteOff {note} vel16 {velocity}", channel + 1),
+            Self::Midi2ControlChange {
+                channel,
+                controller,
+                value,
+                ..
+            } => format!("Ch{} M2 CC{controller} {value}", channel + 1),
+            Self::Midi2PolyPressure {
+                channel,
+                note,
+                pressure,
+                ..
+            } => format!("Ch{} M2 PolyPress {note} {pressure}", channel + 1),
+            Self::Midi2ProgramChange {
+                channel,
+                program,
+                bank_valid,
+                bank_msb,
+                bank_lsb,
+                ..
+            } => {
+                if bank_valid {
+                    format!(
+                        "Ch{} M2 Program {program} bank {bank_msb}/{bank_lsb}",
+                        channel + 1
+                    )
+                } else {
+                    format!("Ch{} M2 Program {program}", channel + 1)
+                }
+            }
+            Self::Midi2ChannelPressure {
+                channel, pressure, ..
+            } => format!("Ch{} M2 ChanPress {pressure}", channel + 1),
+            Self::Midi2PitchBend { channel, value, .. } => {
+                format!("Ch{} M2 PitchBend {value}", channel + 1)
+            }
             Self::Other {
                 message_type,
                 status,
@@ -124,6 +213,7 @@ pub fn decode(msg: &UmpMessage) -> Decoded {
         0x1 => decode_system(group, msg.status_byte()),
         0x2 => decode_midi1_channel(group, msg.words()[0]),
         0x3 => decode_sysex7(group, msg),
+        0x4 => decode_midi2_channel(msg),
         mt => Decoded::Other {
             message_type: mt,
             group,
@@ -200,6 +290,63 @@ fn decode_midi1_channel(group: u8, word: u32) -> Decoded {
     }
 }
 
+fn decode_midi2_channel(msg: &UmpMessage) -> Decoded {
+    let group = msg.group();
+    let status = msg.status_byte();
+    let channel = status & 0x0F;
+    let d1 = msg.data1();
+    let w1 = msg.words().get(1).copied().unwrap_or(0);
+    match status & 0xF0 {
+        0x90 => Decoded::Midi2NoteOn {
+            group,
+            channel,
+            note: d1,
+            velocity: (w1 >> 16) as u16,
+        },
+        0x80 => Decoded::Midi2NoteOff {
+            group,
+            channel,
+            note: d1,
+            velocity: (w1 >> 16) as u16,
+        },
+        0xB0 => Decoded::Midi2ControlChange {
+            group,
+            channel,
+            controller: d1,
+            value: w1,
+        },
+        0xA0 => Decoded::Midi2PolyPressure {
+            group,
+            channel,
+            note: d1,
+            pressure: w1,
+        },
+        0xC0 => Decoded::Midi2ProgramChange {
+            group,
+            channel,
+            program: ((w1 >> 24) & 0x7F) as u8,
+            bank_msb: ((w1 >> 8) & 0x7F) as u8,
+            bank_lsb: (w1 & 0x7F) as u8,
+            bank_valid: d1 & 0x01 != 0,
+        },
+        0xD0 => Decoded::Midi2ChannelPressure {
+            group,
+            channel,
+            pressure: w1,
+        },
+        0xE0 => Decoded::Midi2PitchBend {
+            group,
+            channel,
+            value: w1,
+        },
+        _ => Decoded::Other {
+            message_type: 0x4,
+            group,
+            status,
+        },
+    }
+}
+
 fn decode_sysex7(group: u8, msg: &UmpMessage) -> Decoded {
     let w0 = msg.words()[0];
     let w1 = msg.words().get(1).copied().unwrap_or(0);
@@ -265,5 +412,36 @@ mod tests {
             }
             other => panic!("expected sysex, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn decodes_midi2_note_on() {
+        let msg = UmpMessage::midi2_channel_voice(1, 0x92, 64, 0, 0x8000_0000);
+        assert_eq!(
+            decode(&msg),
+            Decoded::Midi2NoteOn {
+                group: 1,
+                channel: 2,
+                note: 64,
+                velocity: 0x8000
+            }
+        );
+        assert_eq!(decode(&msg).summary(), "Ch3 M2 NoteOn 64 vel16 32768");
+    }
+
+    #[test]
+    fn decodes_midi2_cc_and_pitch() {
+        let cc = UmpMessage::midi2_channel_voice(0, 0xB0, 7, 0, 0x8000_0000);
+        assert_eq!(
+            decode(&cc),
+            Decoded::Midi2ControlChange {
+                group: 0,
+                channel: 0,
+                controller: 7,
+                value: 0x8000_0000
+            }
+        );
+        let pb = UmpMessage::midi2_channel_voice(0, 0xE4, 0, 0, 0x8000_0000);
+        assert_eq!(decode(&pb).summary(), "Ch5 M2 PitchBend 2147483648");
     }
 }

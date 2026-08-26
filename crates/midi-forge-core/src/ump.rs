@@ -45,6 +45,19 @@ impl UmpMessage {
         Self::try_from_words(&[word])
     }
 
+    /// MIDI 2.0 Channel Voice (UMP type 0x4), two words.
+    pub fn midi2_channel_voice(group: u8, status: u8, data1: u8, data2: u8, word1: u32) -> Self {
+        let word0 = (0x4 << 28)
+            | (u32::from(group & 0x0F) << 24)
+            | (u32::from(status) << 16)
+            | (u32::from(data1) << 8)
+            | u32::from(data2);
+        Self {
+            words: [word0, word1, 0, 0],
+            len: 2,
+        }
+    }
+
     /// MIDI 1.0 Channel Voice (UMP type 0x2), one word.
     pub fn midi1_channel_voice(group: u8, status: u8, data1: u8, data2: u8) -> Self {
         let word = (0x2 << 28)
@@ -143,14 +156,14 @@ impl UmpMessage {
         Some((status, count, data))
     }
 
-    /// MIDI 1.0 channel (0–15) for channel-voice packets.
+    /// MIDI channel (0–15) for MIDI 1.0 or MIDI 2.0 channel-voice packets.
     pub fn channel(&self) -> Option<u8> {
-        (self.message_type() == 0x2).then_some(self.status_byte() & 0x0F)
+        matches!(self.message_type(), 0x2 | 0x4).then_some(self.status_byte() & 0x0F)
     }
 
-    /// Rewrite the MIDI 1.0 channel; other packet types are unchanged.
+    /// Rewrite the channel nibble on MIDI 1.0 / MIDI 2.0 channel voice.
     pub fn with_channel(mut self, channel: u8) -> Self {
-        if self.message_type() == 0x2 {
+        if matches!(self.message_type(), 0x2 | 0x4) {
             let status = (self.status_byte() & 0xF0) | (channel & 0x0F);
             self.words[0] = (self.words[0] & 0xFF00_FFFF) | (u32::from(status) << 16);
         }
@@ -233,5 +246,15 @@ mod tests {
         let clock = UmpMessage::midi1_system(0, 0xF8, 0, 0);
         assert_eq!(clock.channel(), None);
         assert_eq!(clock.with_channel(5), clock);
+    }
+
+    #[test]
+    fn midi2_channel_and_rewrite() {
+        let msg = UmpMessage::midi2_channel_voice(1, 0x92, 64, 0, 0x8000_0000).with_channel(5);
+        assert_eq!(msg.channel(), Some(5));
+        assert_eq!(msg.status_byte(), 0x95);
+        assert_eq!(msg.message_type(), 0x4);
+        assert_eq!(msg.group(), 1);
+        assert_eq!(msg.data1(), 64);
     }
 }

@@ -2,7 +2,7 @@
 
 Modern 64-bit MIDI diagnostic and routing utility (MIDI-OX successor). Rust engine, native Windows/macOS desktop first.
 
-Phase 5 adds an MPE zone/voice inspector (RPN 6 MCM) and app-local virtual cables (`forge:loop:*`). DAW-visible ports are whatever WinMM already lists (loopMIDI, MIDI Services).
+Phase 6 treats UMP as a first-class wire format: MIDI 2.0 channel-voice decode in the monitor, downscale to MIDI 1 for WinMM send, a MidiSrv probe on Windows (`winmm+midisrv`), and a CoreMIDI backend with virtual ports on macOS. Native Windows MIDI Services `MidiSession` I/O waits on the App SDK projection.
 
 ## Build
 
@@ -14,7 +14,7 @@ cargo run -p midi-forge-app -- --list
 cargo run -p midi-forge-app
 ```
 
-`--list` prints WinMM inputs and outputs. The GUI auto-opens every input. Play notes on a connected keyboard and they should appear in the monitor.
+`--list` prints endpoints with a MIDI 1 / UMP protocol tag. The GUI auto-opens every input. Play notes on a connected keyboard and they should appear in the monitor. MIDI 2 packets show as `M2 NoteOn` (16-bit velocity) and similar.
 
 Thru: tick a cell in the bottom matrix (for example MPK mini play → Microsoft GS Wavetable Synth). Cables on the patchbay follow the same graph. Select a cell to edit its filter and data map (transpose, CC remap, invert velocity, type conversion). **Save** / **Load** write a JSON profile.
 
@@ -22,7 +22,7 @@ Uncheck **Clock** to strip MIDI clock. Pause freezes the log but does not stop t
 
 SysEx: arm receive on the right panel, or send **Identity request** to the selected output. **Delay after F7** (default 60 ms) spaces dumps when sending a `.syx` file.
 
-MPE: the monitor shows zones (RPN 6) and live notes with bend/pressure/timbre (CC74). **Add cable** creates an in-app loopback you can thru through; it is not visible to other programs. loopMIDI / MIDI Services ports still appear in the endpoint list.
+MPE: the monitor shows zones (RPN 6) and live notes with bend/pressure/timbre (CC74). **Add cable** creates an in-app loopback on Windows (`forge:loop:*`, not visible to other programs) or a CoreMIDI virtual pair on macOS (other apps can see it). loopMIDI / MIDI Services ports still appear in the Windows endpoint list. When MidiSrv is running the banner shows **MidiSrv**.
 
 Panic sends All Sound Off / Reset CC / All Notes Off on all 16 channels to every output it can open.
 

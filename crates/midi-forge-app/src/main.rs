@@ -41,7 +41,12 @@ fn list_ports() {
                     Direction::Output => "out",
                     Direction::Bidirectional => "bidi",
                 };
-                println!("{dir}  {:<16}  {}", ep.id.0, ep.name);
+                println!(
+                    "{dir}  {:<6}  {:<18}  {}",
+                    ep.protocol.label(),
+                    ep.id.0,
+                    ep.name
+                );
             }
         }
         Err(err) => {

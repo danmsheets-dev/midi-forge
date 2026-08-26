@@ -31,6 +31,15 @@ pub fn message_kind(msg: &UmpMessage) -> MessageKind {
             0xE0 => MessageKind::PitchBend,
             _ => MessageKind::Other,
         },
+        0x4 => match msg.status_byte() & 0xF0 {
+            0x80 | 0x90 => MessageKind::Note,
+            0xA0 => MessageKind::PolyPressure,
+            0xB0 => MessageKind::ControlChange,
+            0xC0 => MessageKind::ProgramChange,
+            0xD0 => MessageKind::ChannelPressure,
+            0xE0 => MessageKind::PitchBend,
+            _ => MessageKind::Other,
+        },
         0x3 => MessageKind::Sysex,
         0x1 => match msg.status_byte() {
             0xF8 => MessageKind::Clock,
@@ -203,5 +212,24 @@ mod tests {
         let cc = UmpMessage::midi1_channel_voice(0, 0xB0, 7, 64);
         assert_eq!(f.apply(&note_on(0)), None);
         assert_eq!(f.apply(&cc), Some(cc));
+    }
+
+    #[test]
+    fn midi2_notes_obey_note_filter_and_channel() {
+        let m2 = UmpMessage::midi2_channel_voice(0, 0x90, 60, 0, 0x8000_0000);
+        let drop_notes = Filter {
+            notes: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_notes.apply(&m2), None);
+
+        let mut ch0 = Filter::default();
+        ch0.set_all_channels(false);
+        ch0.set_channel_enabled(0, true);
+        ch0.force_channel = Some(4);
+        let out = ch0.apply(&m2).expect("channel 0 MIDI 2 note");
+        assert_eq!(out.channel(), Some(4));
+        assert_eq!(out.message_type(), 0x4);
+        assert_eq!(out.data1(), 60);
     }
 }

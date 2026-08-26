@@ -19,6 +19,15 @@ pub enum ProtocolHint {
     Ump,
 }
 
+impl ProtocolHint {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Midi1Bytes => "MIDI 1",
+            Self::Ump => "UMP",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Endpoint {
     pub id: EndpointId,
@@ -52,8 +61,23 @@ pub fn default_backend() -> Box<dyn MidiBackend> {
     {
         Box::new(crate::winmm::WinMmBackend::new())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        Box::new(crate::coremidi_backend::CoreMidiBackend::new())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         Box::new(crate::null::NullBackend::empty())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProtocolHint;
+
+    #[test]
+    fn protocol_labels() {
+        assert_eq!(ProtocolHint::Midi1Bytes.label(), "MIDI 1");
+        assert_eq!(ProtocolHint::Ump.label(), "UMP");
     }
 }
