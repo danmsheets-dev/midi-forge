@@ -6,6 +6,10 @@ pub enum IoError {
     Backend(String),
     #[error("endpoint not found: {0}")]
     NotFound(String),
-    #[error("opening streams is not implemented in Phase 0")]
-    NotImplemented,
+    #[error("{0} is already open")]
+    AlreadyOpen(String),
+    #[error("{0} is in use by another application")]
+    InUse(String),
+    #[error("cannot send this packet to a MIDI 1.0 short-message port")]
+    UnsupportedPacket,
 }

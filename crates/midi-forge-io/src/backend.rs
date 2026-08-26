@@ -1,3 +1,5 @@
+use midi_forge_core::{MidiEvent, PortId, UmpMessage};
+
 use crate::error::IoError;
 
 /// Stable id for an OS endpoint. Format is backend-specific, e.g. `winmm:in:0`.
@@ -25,11 +27,19 @@ pub struct Endpoint {
     pub protocol: ProtocolHint,
 }
 
-/// Platform MIDI I/O. Phase 0 only requires enumeration.
+/// Platform MIDI I/O.
 pub trait MidiBackend {
     fn name(&self) -> &'static str;
     fn refresh(&mut self) -> Result<(), IoError>;
     fn endpoints(&self) -> &[Endpoint];
+    fn open_input(&mut self, id: &EndpointId, port: PortId) -> Result<(), IoError>;
+    fn close_input(&mut self, id: &EndpointId) -> Result<(), IoError>;
+    fn open_output(&mut self, id: &EndpointId, port: PortId) -> Result<(), IoError>;
+    fn close_output(&mut self, id: &EndpointId) -> Result<(), IoError>;
+    /// Drain captured events. Returns the cumulative count of frames dropped
+    /// because the capture queue was full.
+    fn poll(&mut self, out: &mut Vec<MidiEvent>) -> u64;
+    fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError>;
 }
 
 pub fn default_backend() -> Box<dyn MidiBackend> {

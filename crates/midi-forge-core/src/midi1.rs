@@ -159,6 +159,85 @@ fn data_len(status: u8) -> u8 {
     }
 }
 
+/// Data bytes that follow a MIDI 1.0 status byte (0, 1, or 2).
+pub fn midi1_data_len(status: u8) -> u8 {
+    data_len(status)
+}
+
+/// Convert a complete MIDI 1.0 message into UMP (group 0).
+pub fn ump_from_status_data(status: u8, data1: u8, data2: u8) -> UmpMessage {
+    system_or_channel(0, status, data1, data2)
+}
+
+/// WinMM `MIM_DATA` packing: `status | data1 << 8 | data2 << 16`.
+pub fn ump_from_packed_short(packed: u32) -> UmpMessage {
+    let status = (packed & 0xFF) as u8;
+    let data1 = ((packed >> 8) & 0xFF) as u8;
+    let data2 = ((packed >> 16) & 0xFF) as u8;
+    ump_from_status_data(status, data1, data2)
+}
+
+/// Pack a MIDI 1.0 UMP channel/system message for `midiOutShortMsg`.
+pub fn packed_short_from_ump(msg: &UmpMessage) -> Option<u32> {
+    match msg.message_type() {
+        0x1 | 0x2 => {
+            let word = msg.words()[0];
+            let status = ((word >> 16) & 0xFF) as u8;
+            let data1 = ((word >> 8) & 0xFF) as u8;
+            let data2 = (word & 0xFF) as u8;
+            Some(u32::from(status) | (u32::from(data1) << 8) | (u32::from(data2) << 16))
+        }
+        _ => None,
+    }
+}
+
+/// Hex of the original MIDI 1.0 bytes, or raw UMP words for other types.
+pub fn format_wire_hex(msg: &UmpMessage) -> String {
+    match msg.message_type() {
+        0x1 | 0x2 => {
+            let word = msg.words()[0];
+            let status = ((word >> 16) & 0xFF) as u8;
+            let data1 = ((word >> 8) & 0xFF) as u8;
+            let data2 = (word & 0xFF) as u8;
+            match data_len(status) {
+                0 => format!("{status:02X}"),
+                1 => format!("{status:02X} {data1:02X}"),
+                _ => format!("{status:02X} {data1:02X} {data2:02X}"),
+            }
+        }
+        0x3 => {
+            let w0 = msg.words()[0];
+            let w1 = msg.words().get(1).copied().unwrap_or(0);
+            let count = ((w0 >> 16) & 0xF) as usize;
+            let bytes = [
+                ((w0 >> 8) & 0xFF) as u8,
+                (w0 & 0xFF) as u8,
+                ((w1 >> 24) & 0xFF) as u8,
+                ((w1 >> 16) & 0xFF) as u8,
+                ((w1 >> 8) & 0xFF) as u8,
+                (w1 & 0xFF) as u8,
+            ];
+            let payload = bytes
+                .iter()
+                .take(count.min(6))
+                .map(|b| format!("{b:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if payload.is_empty() {
+                "F0 F7".into()
+            } else {
+                format!("F0 {payload} F7")
+            }
+        }
+        _ => msg
+            .words()
+            .iter()
+            .map(|w| format!("{w:08X}"))
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
 fn system_or_channel(group: u8, status: u8, d1: u8, d2: u8) -> UmpMessage {
     if status >= 0xF0 {
         UmpMessage::midi1_system(group, status, d1, d2)
@@ -232,5 +311,28 @@ mod tests {
         let mut p = Midi1Parser::new();
         let msgs = p.push_slice(&[60, 127]);
         assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn packed_winmm_note_on_matches_ump() {
+        let packed = 0x90 | (60 << 8) | (127 << 16);
+        let msg = ump_from_packed_short(packed);
+        assert_eq!(msg.words()[0], 0x2090_3C7F);
+        assert_eq!(packed_short_from_ump(&msg), Some(packed));
+        assert_eq!(format_wire_hex(&msg), "90 3C 7F");
+    }
+
+    #[test]
+    fn packed_clock_is_system_ump() {
+        let msg = ump_from_packed_short(0xF8);
+        assert_eq!(msg.message_type(), 0x1);
+        assert_eq!(msg.words()[0], 0x10F8_0000);
+        assert_eq!(format_wire_hex(&msg), "F8");
+    }
+
+    #[test]
+    fn program_change_hex_omits_second_data_byte() {
+        let msg = ump_from_status_data(0xC3, 12, 0);
+        assert_eq!(format_wire_hex(&msg), "C3 0C");
     }
 }

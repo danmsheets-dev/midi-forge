@@ -21,10 +21,21 @@ pub enum Decoded {
         controller: u8,
         value: u8,
     },
+    PolyPressure {
+        group: u8,
+        channel: u8,
+        note: u8,
+        pressure: u8,
+    },
     ProgramChange {
         group: u8,
         channel: u8,
         program: u8,
+    },
+    ChannelPressure {
+        group: u8,
+        channel: u8,
+        pressure: u8,
     },
     PitchBend {
         group: u8,
@@ -78,9 +89,18 @@ impl Decoded {
                 value,
                 ..
             } => format!("Ch{} CC{controller} {value}", channel + 1),
+            Self::PolyPressure {
+                channel,
+                note,
+                pressure,
+                ..
+            } => format!("Ch{} PolyPress {note} {pressure}", channel + 1),
             Self::ProgramChange {
                 channel, program, ..
             } => format!("Ch{} Program {program}", channel + 1),
+            Self::ChannelPressure {
+                channel, pressure, ..
+            } => format!("Ch{} ChanPress {pressure}", channel + 1),
             Self::PitchBend {
                 channel, lsb, msb, ..
             } => format!("Ch{} PitchBend {lsb}/{msb}", channel + 1),
@@ -144,6 +164,12 @@ fn decode_midi1_channel(group: u8, word: u32) -> Decoded {
             note: data1,
             velocity: data2,
         },
+        0xA0 => Decoded::PolyPressure {
+            group,
+            channel,
+            note: data1,
+            pressure: data2,
+        },
         0xB0 => Decoded::ControlChange {
             group,
             channel,
@@ -154,6 +180,11 @@ fn decode_midi1_channel(group: u8, word: u32) -> Decoded {
             group,
             channel,
             program: data1,
+        },
+        0xD0 => Decoded::ChannelPressure {
+            group,
+            channel,
+            pressure: data1,
         },
         0xE0 => Decoded::PitchBend {
             group,
