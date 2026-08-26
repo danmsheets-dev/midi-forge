@@ -14,9 +14,10 @@ impl UmpMessage {
     /// Number of 32-bit words for a UMP message type, if the type is defined.
     pub const fn word_count(message_type: u8) -> Option<usize> {
         match message_type & 0x0F {
-            0x0..=0x2 => Some(1),
-            0x3 | 0x4 => Some(2),
-            0x5 | 0xD | 0xF => Some(4),
+            0x0..=0x2 | 0x6 | 0x7 => Some(1),
+            0x3 | 0x4 | 0x8..=0xA => Some(2),
+            0xB | 0xC => Some(3),
+            0x5 | 0xD | 0xE | 0xF => Some(4),
             _ => None,
         }
     }
@@ -185,7 +186,10 @@ mod tests {
         assert_eq!(UmpMessage::word_count(0x5), Some(4));
         assert_eq!(UmpMessage::word_count(0xD), Some(4));
         assert_eq!(UmpMessage::word_count(0xF), Some(4));
-        assert_eq!(UmpMessage::word_count(0x6), None);
+        assert_eq!(UmpMessage::word_count(0x6), Some(1));
+        assert_eq!(UmpMessage::word_count(0x8), Some(2));
+        assert_eq!(UmpMessage::word_count(0xB), Some(3));
+        assert_eq!(UmpMessage::word_count(0xE), Some(4));
     }
 
     #[test]
@@ -216,10 +220,9 @@ mod tests {
             UmpMessage::try_from_words(&[]).unwrap_err(),
             CoreError::EmptyPacket
         );
-        assert_eq!(
-            UmpMessage::from_word(0x6000_0000).unwrap_err(),
-            CoreError::UnknownMessageType(0x6)
-        );
+        let reserved = UmpMessage::from_word(0x6000_0000).unwrap();
+        assert_eq!(reserved.len(), 1);
+        assert_eq!(reserved.message_type(), 0x6);
     }
 
     #[test]

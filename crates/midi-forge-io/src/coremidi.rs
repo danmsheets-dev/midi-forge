@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 
 use coremidi::{
@@ -37,7 +37,7 @@ pub struct CoreMidiBackend {
     tx: SyncSender<(CaptureKey, UmpMessage)>,
     dropped: Arc<AtomicU64>,
     virtual_sources: Vec<(u32, coremidi::VirtualSource)>,
-    virtual_dests: Vec<(u32, coremidi::VirtualDestination)>,
+    virtual_dests: Vec<(u32, coremidi::VirtualDestination, Arc<AtomicBool>)>,
     next_virtual: u32,
     virtual_in_ports: HashMap<u32, PortId>,
 }
@@ -89,12 +89,15 @@ impl MidiBackend for CoreMidiBackend {
 
     fn open_input(&mut self, id: &EndpointId, port: PortId) -> Result<(), IoError> {
         if let Some(idx) = parse_suffix(&id.0, "coremidi:vd:") {
-            if !self.virtual_dests.iter().any(|(n, _)| *n == idx) {
-                return Err(IoError::NotFound(id.0.clone()));
-            }
+            let dest = self
+                .virtual_dests
+                .iter()
+                .find(|(n, _, _)| *n == idx)
+                .ok_or_else(|| IoError::NotFound(id.0.clone()))?;
             if self.virtual_in_ports.contains_key(&idx) {
                 return Err(IoError::AlreadyOpen(id.0.clone()));
             }
+            dest.2.store(true, Ordering::Release);
             self.virtual_in_ports.insert(idx, port);
             return Ok(());
         }
@@ -131,6 +134,9 @@ impl MidiBackend for CoreMidiBackend {
     fn close_input(&mut self, id: &EndpointId) -> Result<(), IoError> {
         if let Some(idx) = parse_suffix(&id.0, "coremidi:vd:") {
             self.virtual_in_ports.remove(&idx);
+            if let Some((_, _, armed)) = self.virtual_dests.iter().find(|(n, _, _)| *n == idx) {
+                armed.store(false, Ordering::Release);
+            }
             return Ok(());
         }
         self.inputs.retain(|p| p.id != id.0);
@@ -211,6 +217,8 @@ impl MidiBackend for CoreMidiBackend {
         };
         let tx = self.tx.clone();
         let dropped = Arc::clone(&self.dropped);
+        let armed = Arc::new(AtomicBool::new(false));
+        let armed_cb = Arc::clone(&armed);
         let client = self
             .client
             .as_ref()
@@ -223,12 +231,15 @@ impl MidiBackend for CoreMidiBackend {
                 &format!("{label} In"),
                 Protocol::Midi20,
                 move |event_list| {
+                    if !armed_cb.load(Ordering::Acquire) {
+                        return;
+                    }
                     push_event_list(&tx, &dropped, CaptureKey::Virtual(idx), event_list);
                 },
             )
             .map_err(|e| IoError::Backend(format!("virtual dest: {e}")))?;
         self.virtual_sources.push((idx, source));
-        self.virtual_dests.push((idx, dest));
+        self.virtual_dests.push((idx, dest, armed));
         self.rebuild_endpoints();
         Ok((
             EndpointId(format!("coremidi:vd:{idx}")),
@@ -244,7 +255,7 @@ impl MidiBackend for CoreMidiBackend {
                 .ok_or_else(|| IoError::NotFound(id.0.clone()))?;
         let before = self.virtual_sources.len() + self.virtual_dests.len();
         self.virtual_sources.retain(|(n, _)| *n != idx);
-        self.virtual_dests.retain(|(n, _)| *n != idx);
+        self.virtual_dests.retain(|(n, _, _)| *n != idx);
         self.virtual_in_ports.remove(&idx);
         if self.virtual_sources.len() + self.virtual_dests.len() == before {
             return Err(IoError::NotFound(id.0.clone()));
@@ -291,7 +302,7 @@ impl CoreMidiBackend {
                 protocol: ProtocolHint::Ump,
             });
         }
-        for (idx, dst) in &self.virtual_dests {
+        for (idx, dst, _) in &self.virtual_dests {
             let name = dst.display_name().unwrap_or_else(|| format!("Forge {idx}"));
             endpoints.push(Endpoint {
                 id: EndpointId(format!("coremidi:vd:{idx}")),
@@ -310,7 +321,7 @@ impl CoreMidiBackend {
                 ids.insert(id);
             }
         }
-        for (_, dst) in &self.virtual_dests {
+        for (_, dst, _) in &self.virtual_dests {
             if let Some(id) = dst.unique_id() {
                 ids.insert(id);
             }

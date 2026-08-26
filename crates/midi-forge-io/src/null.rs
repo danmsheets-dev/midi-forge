@@ -135,8 +135,7 @@ impl MidiBackend for NullBackend {
 
     fn poll(&mut self, out: &mut Vec<MidiEvent>) -> u64 {
         out.append(&mut self.pending);
-        self.loopbacks.poll(out);
-        self.dropped
+        self.dropped + self.loopbacks.poll(out)
     }
 
     fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError> {

@@ -27,7 +27,10 @@ const SYSEX_BUFFERS: usize = 8;
 const SYSEX_CAP: usize = 16 * 1024;
 const QUEUE_CAP: usize = 4096;
 const MHDR_DONE: u32 = 0x0000_0001;
-const SYSEX_SEND_TIMEOUT: Duration = Duration::from_secs(5);
+fn sysex_send_timeout(len: usize) -> Duration {
+    let ms = 2_000 + (len as u64).saturating_mul(1000) / 2_500;
+    Duration::from_millis(ms.min(60_000))
+}
 
 #[repr(C)]
 struct MidiInCapsW {
@@ -252,8 +255,16 @@ impl MidiBackend for WinMmBackend {
             match prepare_sysex(handle) {
                 Ok(buf) => buffers.push(buf),
                 Err(err) => {
+                    shared.live.store(false, Ordering::Release);
                     unsafe {
                         midiInReset(handle);
+                        for buf in &mut buffers {
+                            midiInUnprepareHeader(
+                                handle,
+                                buf.hdr.as_mut(),
+                                size_of::<MidiHdr>() as u32,
+                            );
+                        }
                         midiInClose(handle);
                     }
                     return Err(err);
@@ -355,8 +366,8 @@ impl MidiBackend for WinMmBackend {
                 }
             }
         }
-        self.loopbacks.poll(out);
-        self.dropped.load(Ordering::Relaxed)
+        let loop_dropped = self.loopbacks.poll(out);
+        self.dropped.load(Ordering::Relaxed) + loop_dropped
     }
 
     fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError> {
@@ -366,11 +377,13 @@ impl MidiBackend for WinMmBackend {
         let Some(output) = self.outputs.get(&id.0) else {
             return Err(IoError::NotFound(id.0.clone()));
         };
-        let packet = downscale_to_midi1(packet);
-        let packed = packed_short_from_ump(&packet).ok_or(IoError::UnsupportedPacket)?;
-        let rc = unsafe { midiOutShortMsg(output.handle, packed) };
-        if rc != MMSYSERR_NOERROR {
-            return Err(mm_error(rc, &format!("midiOutShortMsg {}", id.0)));
+        let handle = output.handle;
+        for packet in downscale_to_midi1(packet) {
+            let packed = packed_short_from_ump(&packet).ok_or(IoError::UnsupportedPacket)?;
+            let rc = unsafe { midiOutShortMsg(handle, packed) };
+            if rc != MMSYSERR_NOERROR {
+                return Err(mm_error(rc, &format!("midiOutShortMsg {}", id.0)));
+            }
         }
         Ok(())
     }
@@ -426,7 +439,7 @@ fn send_long_message(handle: usize, bytes: &[u8]) -> Result<(), IoError> {
         }
         return Err(mm_error(rc, "midiOutLongMsg"));
     }
-    let deadline = Instant::now() + SYSEX_SEND_TIMEOUT;
+    let deadline = Instant::now() + sysex_send_timeout(bytes.len());
     while hdr.flags & MHDR_DONE == 0 {
         if Instant::now() > deadline {
             unsafe {

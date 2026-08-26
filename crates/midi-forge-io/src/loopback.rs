@@ -3,6 +3,8 @@ use midi_forge_core::{Midi1Parser, MidiEvent, PortId, Timestamp, UmpMessage};
 use crate::backend::{Direction, Endpoint, EndpointId, ProtocolHint};
 use crate::error::IoError;
 
+const QUEUE_CAP: usize = 4096;
+
 /// In-process A/B MIDI cable. Other applications do not see these ports.
 pub struct SoftwareLoopbacks {
     cables: Vec<Cable>,
@@ -15,6 +17,7 @@ struct Cable {
     in_port: Option<PortId>,
     out_open: bool,
     queue: Vec<MidiEvent>,
+    dropped: u64,
 }
 
 impl SoftwareLoopbacks {
@@ -39,6 +42,7 @@ impl SoftwareLoopbacks {
             in_port: None,
             out_open: false,
             queue: Vec::new(),
+            dropped: 0,
         });
         (in_id(index), out_id(index))
     }
@@ -121,9 +125,13 @@ impl SoftwareLoopbacks {
             return Err(IoError::NotFound(id.0.clone()));
         }
         if let Some(port) = cable.in_port {
-            cable
-                .queue
-                .push(MidiEvent::new(Timestamp::from_nanos(0), port, packet));
+            if cable.queue.len() >= QUEUE_CAP {
+                cable.dropped += 1;
+            } else {
+                cable
+                    .queue
+                    .push(MidiEvent::new(Timestamp::from_nanos(0), port, packet));
+            }
         }
         Ok(())
     }
@@ -137,10 +145,13 @@ impl SoftwareLoopbacks {
         Ok(())
     }
 
-    pub fn poll(&mut self, out: &mut Vec<MidiEvent>) {
+    pub fn poll(&mut self, out: &mut Vec<MidiEvent>) -> u64 {
+        let mut dropped = 0;
         for cable in &mut self.cables {
+            dropped += cable.dropped;
             out.append(&mut cable.queue);
         }
+        dropped
     }
 
     fn cable_mut(&mut self, id: &EndpointId) -> Result<&mut Cable, IoError> {
@@ -201,5 +212,21 @@ mod tests {
         let mut got = Vec::new();
         loops.poll(&mut got);
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn queue_cap_increments_dropped() {
+        let mut loops = SoftwareLoopbacks::new();
+        let (inp, outp) = loops.create("Cap");
+        loops.open_input(&inp, PortId(1)).unwrap();
+        loops.open_output(&outp).unwrap();
+        let note = ump_from_status_data(0x90, 1, 1);
+        for _ in 0..(QUEUE_CAP + 5) {
+            loops.send(&outp, note).unwrap();
+        }
+        let mut got = Vec::new();
+        let dropped = loops.poll(&mut got);
+        assert_eq!(got.len(), QUEUE_CAP);
+        assert_eq!(dropped, 5);
     }
 }

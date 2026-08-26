@@ -7,6 +7,7 @@ use crate::ump::UmpMessage;
 pub struct Midi1Parser {
     group: u8,
     running_status: Option<u8>,
+    current: Option<u8>,
     data: [u8; 2],
     got: u8,
     need: u8,
@@ -29,6 +30,7 @@ impl Midi1Parser {
         Self {
             group: group & 0x0F,
             running_status: None,
+            current: None,
             data: [0; 2],
             got: 0,
             need: 0,
@@ -63,7 +65,6 @@ impl Midi1Parser {
             } else if byte < 0x80 {
                 self.sysex.push(byte);
             } else {
-                emit_sysex(self.group, &self.sysex, true, out);
                 self.sysex.clear();
                 self.in_sysex = false;
                 self.push_byte(byte, out);
@@ -73,6 +74,7 @@ impl Midi1Parser {
 
         if byte == 0xF0 {
             self.running_status = None;
+            self.current = None;
             self.need = 0;
             self.got = 0;
             self.sysex.clear();
@@ -81,16 +83,22 @@ impl Midi1Parser {
         }
 
         if byte >= 0x80 {
-            self.running_status = if byte < 0xF0 { Some(byte) } else { None };
             self.need = data_len(byte);
             self.got = 0;
+            if byte < 0xF0 {
+                self.running_status = Some(byte);
+                self.current = Some(byte);
+            } else {
+                self.running_status = None;
+                self.current = (self.need > 0).then_some(byte);
+            }
             if self.need == 0 {
                 out.push(system_or_channel(self.group, byte, 0, 0));
             }
             return;
         }
 
-        let Some(status) = self.running_status else {
+        let Some(status) = self.current.or(self.running_status) else {
             return;
         };
 
@@ -110,8 +118,10 @@ impl Midi1Parser {
             out.push(system_or_channel(self.group, status, d1, d2));
             self.got = 0;
             if status >= 0xF0 {
-                self.running_status = None;
+                self.current = None;
                 self.need = 0;
+            } else {
+                self.current = self.running_status;
             }
         }
     }
@@ -338,6 +348,26 @@ mod tests {
     fn program_change_hex_omits_second_data_byte() {
         let msg = ump_from_status_data(0xC3, 12, 0);
         assert_eq!(format_wire_hex(&msg), "C3 0C");
+    }
+
+    #[test]
+    fn song_position_and_mtc_have_data_bytes() {
+        let mut p = Midi1Parser::new();
+        let msgs = p.push_slice(&[0xF2, 0x01, 0x02, 0xF1, 0x30, 0xF3, 0x07]);
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0], UmpMessage::midi1_system(0, 0xF2, 0x01, 0x02));
+        assert_eq!(msgs[1], UmpMessage::midi1_system(0, 0xF1, 0x30, 0));
+        assert_eq!(msgs[2], UmpMessage::midi1_system(0, 0xF3, 0x07, 0));
+    }
+
+    #[test]
+    fn aborted_sysex_is_not_emitted() {
+        let mut p = Midi1Parser::new();
+        let msgs = p.push_slice(&[0xF0, 0x01, 0x02, 0x90, 60, 127]);
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].message_type(), 0x2);
+        assert_eq!(msgs[0].status_byte(), 0x90);
+        assert_eq!(msgs[0].data1(), 60);
     }
 
     #[test]

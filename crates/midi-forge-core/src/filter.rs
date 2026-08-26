@@ -38,6 +38,8 @@ pub fn message_kind(msg: &UmpMessage) -> MessageKind {
             0xC0 => MessageKind::ProgramChange,
             0xD0 => MessageKind::ChannelPressure,
             0xE0 => MessageKind::PitchBend,
+            0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 => MessageKind::ControlChange,
+            0x60 => MessageKind::PitchBend,
             _ => MessageKind::Other,
         },
         0x3 => MessageKind::Sysex,
@@ -231,5 +233,16 @@ mod tests {
         assert_eq!(out.channel(), Some(4));
         assert_eq!(out.message_type(), 0x4);
         assert_eq!(out.data1(), 60);
+    }
+
+    #[test]
+    fn midi2_rpn_is_control_change() {
+        let rpn = UmpMessage::midi2_channel_voice(0, 0x20, 0, 6, 0);
+        assert_eq!(message_kind(&rpn), MessageKind::ControlChange);
+        let f = Filter {
+            control_change: false,
+            ..Filter::default()
+        };
+        assert_eq!(f.apply(&rpn), None);
     }
 }

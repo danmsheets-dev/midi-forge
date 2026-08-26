@@ -24,10 +24,10 @@ impl VoiceKind {
             0x80 => Self::NoteOff,
             0x90 => Self::NoteOn,
             0xA0 => Self::PolyPressure,
-            0xB0 => Self::ControlChange,
+            0xB0 | 0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 => Self::ControlChange,
             0xC0 => Self::ProgramChange,
             0xD0 => Self::ChannelPressure,
-            0xE0 => Self::PitchBend,
+            0xE0 | 0x60 => Self::PitchBend,
             _ => return None,
         })
     }
@@ -187,7 +187,8 @@ impl Matcher {
         }
         let (d1, d2) = if packet.message_type() == 0x4 {
             let m1 = crate::midi2::downscale_to_midi1(packet);
-            (m1.data1(), m1.data2())
+            let p = m1.last().copied().unwrap_or(*packet);
+            (p.data1(), p.data2())
         } else {
             (packet.data1(), packet.data2())
         };
@@ -217,6 +218,43 @@ pub enum MapAction {
     },
 }
 
+fn vel7_to_16(v: u8) -> u16 {
+    if v == 0 {
+        0
+    } else {
+        (u32::from(v) * 65535 / 127) as u16
+    }
+}
+
+fn rewrite_midi2(
+    packet: &UmpMessage,
+    out_kind: VoiceKind,
+    status: u8,
+    data1: &ValueMap,
+    data2: &ValueMap,
+) -> UmpMessage {
+    let d1 = data1.apply(packet.data1());
+    let old_w1 = packet.words().get(1).copied().unwrap_or(0);
+    let w1 = if matches!(data2, ValueMap::Keep) {
+        old_w1
+    } else {
+        let scaled = crate::midi2::downscale_to_midi1(packet);
+        let src_d2 = scaled.last().map(|p| p.data2()).unwrap_or(0);
+        let d2 = data2.apply(src_d2);
+        match out_kind {
+            VoiceKind::NoteOn | VoiceKind::NoteOff => {
+                (u32::from(vel7_to_16(d2)) << 16) | (old_w1 & 0xFFFF)
+            }
+            VoiceKind::ControlChange | VoiceKind::PolyPressure | VoiceKind::ChannelPressure => {
+                u32::from(d2) << 25
+            }
+            VoiceKind::PitchBend => u32::from(d2) << 25,
+            VoiceKind::ProgramChange => u32::from(d2) << 24,
+        }
+    };
+    UmpMessage::midi2_channel_voice(packet.group(), status, d1, packet.data2(), w1)
+}
+
 impl MapAction {
     fn apply(&self, packet: &UmpMessage) -> Option<UmpMessage> {
         match self {
@@ -227,17 +265,15 @@ impl MapAction {
                 data1,
                 data2,
             } => {
-                let src = if packet.message_type() == 0x4 {
-                    crate::midi2::downscale_to_midi1(packet)
-                } else {
-                    *packet
-                };
-                let src_kind = VoiceKind::from_packet(&src)?;
+                let src_kind = VoiceKind::from_packet(packet)?;
                 let out_kind = kind.unwrap_or(src_kind);
-                let ch = channel.unwrap_or_else(|| src.channel().unwrap_or(0)) & 0x0F;
-                let d1 = data1.apply(src.data1());
-                let d2 = data2.apply(src.data2());
+                let ch = channel.unwrap_or_else(|| packet.channel().unwrap_or(0)) & 0x0F;
                 let status = out_kind.status_nibble() | ch;
+                if packet.message_type() == 0x4 {
+                    return Some(rewrite_midi2(packet, out_kind, status, data1, data2));
+                }
+                let d1 = data1.apply(packet.data1());
+                let d2 = data2.apply(packet.data2());
                 Some(UmpMessage::midi1_channel_voice(
                     packet.group(),
                     status,
@@ -488,12 +524,12 @@ mod tests {
     }
 
     #[test]
-    fn midi2_note_transpose_emits_midi1() {
+    fn midi2_note_transpose_keeps_ump_type() {
         let map = DataMap::transpose(2);
         let m2 = UmpMessage::midi2_channel_voice(0, 0x90, 60, 0, 0xFFFF_0000);
         let out = map.apply(&m2).expect("mapped");
-        assert_eq!(out.message_type(), 0x2);
+        assert_eq!(out.message_type(), 0x4);
         assert_eq!(out.data1(), 62);
-        assert_eq!(out.data2(), 127);
+        assert_eq!(out.words()[1], 0xFFFF_0000);
     }
 }

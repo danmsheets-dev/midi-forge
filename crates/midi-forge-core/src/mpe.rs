@@ -158,9 +158,21 @@ impl MpeTracker {
     }
 
     pub fn push(&mut self, packet: &UmpMessage) {
+        if packet.message_type() == 0x4 {
+            for p in crate::midi2::downscale_to_midi1(packet) {
+                if p.message_type() == 0x2 {
+                    self.push_midi1(&p);
+                }
+            }
+            return;
+        }
         if packet.message_type() != 0x2 {
             return;
         }
+        self.push_midi1(packet);
+    }
+
+    fn push_midi1(&mut self, packet: &UmpMessage) {
         let status = packet.status_byte();
         let ch = status & 0x0F;
         let d1 = packet.data1();
@@ -394,6 +406,16 @@ mod tests {
         assert_eq!(v.pressure, 40);
         t.push(&note_off(2, 60));
         assert!(t.voices().is_empty());
+    }
+
+    #[test]
+    fn midi2_note_on_tracks_voice() {
+        let mut t = MpeTracker::new();
+        let m2 = UmpMessage::midi2_channel_voice(0, 0x92, 60, 0, 0x8000_0000);
+        t.push(&m2);
+        assert_eq!(t.voices().len(), 1);
+        assert_eq!(t.voices()[0].channel, 2);
+        assert_eq!(t.voices()[0].note, 60);
     }
 
     #[test]
