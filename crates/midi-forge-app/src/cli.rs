@@ -13,7 +13,7 @@ pub fn dispatch(args: &[String]) -> bool {
     let cmd = args.get(1).map(String::as_str).unwrap_or("");
     matches!(
         cmd,
-        "--help" | "-h" | "help" | "send" | "receive" | "identity" | "panic" | "clock"
+        "--help" | "-h" | "help" | "send" | "receive" | "identity" | "panic" | "clock" | "mcp"
     )
 }
 
@@ -28,6 +28,11 @@ pub fn run(args: &[String]) -> i32 {
         "identity" => cmd_identity(args),
         "panic" => cmd_panic(args),
         "clock" => cmd_clock(args),
+        "mcp" => {
+            eprintln!("midi-forge mcp is handled at process entry (stdio MCP server)");
+            print_help();
+            2
+        }
         other => {
             eprintln!("unknown command {other:?}");
             print_help();
@@ -47,6 +52,7 @@ fn print_help() {
   midi-forge panic --out <name>
   midi-forge receive --in <name> [--seconds N]
   midi-forge clock --out <name> [--bpm 120] [--seconds 2]
+  midi-forge mcp [--attach] [--arm] [--mcp-port 7420] [--mcp-url http://127.0.0.1:7420/mcp]
 "
     );
 }
@@ -397,5 +403,11 @@ mod tests {
         assert_eq!(pkt.group(), 3);
         assert_eq!(pkt.data1(), 48);
         assert_eq!(pkt.data2(), 10);
+    }
+
+    #[test]
+    fn dispatch_includes_mcp() {
+        assert!(dispatch(&args(&["mcp"])));
+        assert!(dispatch(&args(&["mcp", "--attach", "--arm"])));
     }
 }

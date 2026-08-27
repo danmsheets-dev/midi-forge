@@ -16,6 +16,10 @@ use midi_forge_io::{Direction, MidiBackend, default_backend};
 
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("mcp") {
+        attach_parent_console();
+        std::process::exit(mcp::stdio::run(&args));
+    }
     if args.iter().any(|a| a == "--list") {
         attach_parent_console();
         list_ports();

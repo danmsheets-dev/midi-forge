@@ -4,7 +4,7 @@ use midi_forge_core::{
     ClockHealth, HangTracker, LiveView, MidiEvent, MonitorLog, MpeTracker, PortId, Router,
     Timestamp, UmpMessage, decode,
 };
-use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, NullBackend};
+use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, NullBackend, default_backend};
 
 /// Underscore-grouped hex of `packet.words()`, e.g. `2090_3C64`.
 pub fn format_ump_words(packet: &UmpMessage) -> String {
@@ -51,9 +51,9 @@ pub trait McpHost {
     fn open_outputs(&self) -> Vec<String>;
 }
 
-/// Headless host backed by [`NullBackend`] fixtures. Live GUI host is a later task.
+/// Headless host. Tests use [`NullBackend`]; stdio MCP uses [`default_backend`].
 pub struct StandaloneHost {
-    backend: NullBackend,
+    backend: Box<dyn MidiBackend>,
     log: MonitorLog,
     live: LiveView,
     clock: ClockHealth,
@@ -66,12 +66,27 @@ pub struct StandaloneHost {
     port_by_endpoint: HashMap<String, PortId>,
     port_names: HashMap<PortId, String>,
     next_port: u32,
+    sent: Vec<(String, UmpMessage)>,
+    sent_sysex: Vec<(String, Vec<u8>)>,
 }
 
 impl StandaloneHost {
     pub fn with_null() -> Self {
         let mut backend = NullBackend::with_fixture_ports();
         let _ = backend.refresh();
+        Self::from_backend(Box::new(backend))
+    }
+
+    /// Default OS backend, inputs auto-opened like the GUI session.
+    pub fn from_default() -> Self {
+        let mut backend = default_backend();
+        let _ = backend.refresh();
+        let mut host = Self::from_backend(backend);
+        host.auto_open_inputs();
+        host
+    }
+
+    fn from_backend(backend: Box<dyn MidiBackend>) -> Self {
         let mut host = Self {
             backend,
             log: MonitorLog::default(),
@@ -86,6 +101,8 @@ impl StandaloneHost {
             port_by_endpoint: HashMap::new(),
             port_names: HashMap::new(),
             next_port: 1,
+            sent: Vec::new(),
+            sent_sysex: Vec::new(),
         };
         let ids: Vec<EndpointId> = host
             .backend
@@ -97,6 +114,33 @@ impl StandaloneHost {
             host.ensure_port(&id);
         }
         host
+    }
+
+    /// Open every input endpoint. Failures are ignored (device in use).
+    pub fn auto_open_inputs(&mut self) {
+        let ids: Vec<EndpointId> = self
+            .backend
+            .endpoints()
+            .iter()
+            .filter(|e| e.direction == Direction::Input)
+            .map(|e| e.id.clone())
+            .collect();
+        for id in ids {
+            let _ = self.open_input(&id);
+        }
+    }
+
+    /// Drain captured MIDI into the monitor / live / hang trackers.
+    pub fn poll(&mut self) {
+        let mut buf = Vec::new();
+        let _ = self.backend.poll(&mut buf);
+        for event in buf {
+            self.log.push(event);
+            self.live.push(&event.packet);
+            self.hang.push(&event.packet);
+            self.mpe.push(&event.packet);
+            self.clock.push(&event.packet, event.time.nanos);
+        }
     }
 
     /// Inject a MIDI 1 Note On (60 / vel 100) into log, live, and hang trackers.
@@ -121,11 +165,11 @@ impl StandaloneHost {
     }
 
     pub fn sent(&self) -> &[(String, UmpMessage)] {
-        self.backend.sent()
+        &self.sent
     }
 
     pub fn sent_sysex(&self) -> &[(String, Vec<u8>)] {
-        self.backend.sent_sysex()
+        &self.sent_sysex
     }
 
     fn ensure_port(&mut self, id: &EndpointId) -> PortId {
@@ -215,6 +259,18 @@ impl StandaloneHost {
             .open_output(id, port)
             .map_err(|e| e.to_string())?;
         self.open_outputs.insert(id.0.clone());
+        Ok(())
+    }
+
+    fn open_input(&mut self, id: &EndpointId) -> Result<(), String> {
+        if self.open_inputs.contains(&id.0) {
+            return Ok(());
+        }
+        let port = self.ensure_port(id);
+        self.backend
+            .open_input(id, port)
+            .map_err(|e| e.to_string())?;
+        self.open_inputs.insert(id.0.clone());
         Ok(())
     }
 
@@ -433,7 +489,11 @@ impl McpHost for StandaloneHost {
         self.ensure_output_open(&ep.id)?;
         self.hang.push(packet);
         self.live.push(packet);
-        self.backend.send(&ep.id, packet).map_err(|e| e.to_string())
+        self.backend
+            .send(&ep.id, packet)
+            .map_err(|e| e.to_string())?;
+        self.sent.push((ep.id.0.clone(), *packet));
+        Ok(())
     }
 
     fn send_sysex(&mut self, dest: &str, bytes: &[u8]) -> Result<(), String> {
@@ -442,7 +502,9 @@ impl McpHost for StandaloneHost {
         self.ensure_output_open(&ep.id)?;
         self.backend
             .send_sysex(&ep.id, bytes)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        self.sent_sysex.push((ep.id.0.clone(), bytes.to_vec()));
+        Ok(())
     }
 
     fn set_port_open(&mut self, id: &str, output: bool, open: bool) -> Result<(), String> {
@@ -464,13 +526,7 @@ impl McpHost for StandaloneHost {
                 return Err(format!("{} is an output", ep.name));
             }
             if open {
-                if !self.open_inputs.contains(&ep.id.0) {
-                    let port = self.ensure_port(&ep.id);
-                    self.backend
-                        .open_input(&ep.id, port)
-                        .map_err(|e| e.to_string())?;
-                    self.open_inputs.insert(ep.id.0.clone());
-                }
+                self.open_input(&ep.id)?;
             } else if self.open_inputs.remove(&ep.id.0) {
                 self.backend
                     .close_input(&ep.id)
