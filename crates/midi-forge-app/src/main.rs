@@ -7,6 +7,7 @@ mod inject;
 mod live;
 mod mpe;
 mod script;
+mod stream;
 mod sysex;
 mod thru;
 

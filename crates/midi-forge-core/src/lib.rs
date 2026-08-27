@@ -32,6 +32,7 @@ mod sysex;
 mod sysex8;
 mod timing;
 mod ump;
+mod ump_stream;
 mod utility;
 
 pub use cc::{cc_label, cc_name};
@@ -92,4 +93,9 @@ pub use sysex8::{
 };
 pub use timing::{ClockHealth, IntervalHist, MtcState, Transport};
 pub use ump::UmpMessage;
+pub use ump_stream::{
+    DeviceIdentity, EndpointStream, FunctionBlock, PROTOCOL_MIDI1, PROTOCOL_MIDI2, StreamTracker,
+    endpoint_discovery, fb_direction_label, function_block_discovery, stream_configuration_request,
+    stream_inquiries,
+};
 pub use utility::{ump_dctpq, ump_delta_clockstamp, ump_jr_clock, ump_jr_timestamp, ump_noop};

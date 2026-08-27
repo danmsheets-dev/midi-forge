@@ -21,6 +21,7 @@ pub enum MessageKind {
     PerNote,
     Utility,
     Flex,
+    Stream,
     Other,
 }
 
@@ -51,6 +52,7 @@ pub fn message_kind(msg: &UmpMessage) -> MessageKind {
         0x3 => MessageKind::Sysex,
         0x5 => MessageKind::Sysex8,
         0xD => MessageKind::Flex,
+        0xF => MessageKind::Stream,
         0x1 => match msg.status_byte() {
             0xF8 => MessageKind::Clock,
             0xFA..=0xFC => MessageKind::Transport,
@@ -92,6 +94,9 @@ pub struct Filter {
     /// UMP Flex Data (type 0xD): tempo, time signature, text.
     #[serde(default = "default_true")]
     pub flex: bool,
+    /// UMP Stream (type 0xF): endpoint discovery, function blocks, protocol.
+    #[serde(default = "default_true")]
+    pub stream: bool,
     /// Bit `i` enables MIDI channel `i` (0–15).
     pub channels: u16,
     /// If set, rewrite channel-voice packets to this channel after the mask.
@@ -118,6 +123,7 @@ impl Default for Filter {
             per_note: true,
             utility: true,
             flex: true,
+            stream: true,
             channels: 0xFFFF,
             force_channel: None,
         }
@@ -165,6 +171,7 @@ impl Filter {
             MessageKind::PerNote => self.per_note,
             MessageKind::Utility => self.utility,
             MessageKind::Flex => self.flex,
+            MessageKind::Stream => self.stream,
             MessageKind::Other => self.other,
         }
     }
@@ -314,6 +321,7 @@ mod tests {
         assert!(f.utility);
         assert!(f.sysex8);
         assert!(f.flex);
+        assert!(f.stream);
     }
 
     #[test]
@@ -359,5 +367,22 @@ mod tests {
             ..Filter::default()
         };
         assert_eq!(drop_sysex8.apply(&m), None);
+    }
+
+    #[test]
+    fn type_f_stream_passes_when_other_is_dropped() {
+        let m = UmpMessage::try_from_words(&[0xF000_0101, 0x0000_001F, 0, 0]).unwrap();
+        assert_eq!(message_kind(&m), MessageKind::Stream);
+        let drop_other = Filter {
+            other: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_other.apply(&m), Some(m));
+        let drop_stream = Filter {
+            stream: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_stream.apply(&m), None);
+        assert!(Filter::default().apply(&m).is_some());
     }
 }

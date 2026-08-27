@@ -7,12 +7,12 @@ use eframe::egui;
 use midi_forge_core::{
     ClockHealth, ClockMaster, HangTracker, LiveView, MessageKind, MidiEvent, MonitorLog,
     MpeTracker, NrpnTracker, PortId, Profile, ProfileLink, RouteEvent, RouteLog, Router, Scene,
-    SessionRecorder, SysexAssembler, UmpMessage, decode, format_wire_hex, message_kind,
-    panic_packets,
+    SessionRecorder, StreamTracker, SysexAssembler, UmpMessage, decode, format_wire_hex,
+    message_kind, panic_packets, stream_inquiries,
 };
 use midi_forge_io::{
-    Direction, Endpoint, EndpointId, MidiBackend, NetUmp, default_backend, explain_in_use,
-    probe_wms,
+    Direction, Endpoint, EndpointId, MidiBackend, NetUmp, ProtocolHint, default_backend,
+    explain_in_use, is_loopback_pair, probe_wms,
 };
 
 use crate::clock;
@@ -20,6 +20,7 @@ use crate::inject;
 use crate::live;
 use crate::mpe;
 use crate::script::{self, RightTab};
+use crate::stream;
 use crate::sysex::{self, Librarian};
 use crate::thru;
 
@@ -39,10 +40,12 @@ pub(crate) struct EngineInner {
     paused: bool,
     follow: bool,
     dropped: u64,
-    open_inputs: HashSet<String>,
+    pub(crate) open_inputs: HashSet<String>,
     pub(crate) open_outputs: HashSet<String>,
     pub(crate) port_names: HashMap<PortId, String>,
-    port_by_endpoint: HashMap<String, PortId>,
+    pub(crate) port_by_endpoint: HashMap<String, PortId>,
+    pub(crate) stream: HashMap<PortId, StreamTracker>,
+    pub(crate) selected_endpoint: Option<String>,
     endpoint_by_port: HashMap<PortId, EndpointId>,
     pub(crate) port_errors: HashMap<String, String>,
     pub(crate) selected_link: Option<(PortId, PortId)>,
@@ -155,6 +158,8 @@ impl EngineInner {
             open_outputs: HashSet::new(),
             port_names: HashMap::new(),
             port_by_endpoint: HashMap::new(),
+            stream: HashMap::new(),
+            selected_endpoint: None,
             endpoint_by_port: HashMap::new(),
             port_errors: HashMap::new(),
             selected_link: None,
@@ -340,8 +345,10 @@ impl EngineInner {
                 .map_err(|e| self.open_err(id, &e))?;
             self.open_inputs.insert(id.0.clone());
             self.port_errors.remove(&id.0);
+            self.send_stream_inquiries(id);
         } else if self.open_inputs.remove(&id.0) {
             self.backend.close_input(id).map_err(|e| e.to_string())?;
+            self.stream.remove(&port);
         }
         Ok(())
     }
@@ -357,10 +364,41 @@ impl EngineInner {
                 .map_err(|e| self.open_err(id, &e))?;
             self.open_outputs.insert(id.0.clone());
             self.port_errors.remove(&id.0);
+            self.send_stream_inquiries(id);
         } else if self.open_outputs.remove(&id.0) {
             self.backend.close_output(id).map_err(|e| e.to_string())?;
         }
         Ok(())
+    }
+
+    /// UMP Stream inquiries (M2-104-UM §7.1). Skip MIDI 1 bytestream endpoints.
+    fn send_stream_inquiries(&mut self, opened: &EndpointId) {
+        let Some(ep) = self.endpoints.iter().find(|e| e.id == *opened) else {
+            return;
+        };
+        if ep.protocol != ProtocolHint::Ump {
+            return;
+        }
+        let dest = match ep.direction {
+            Direction::Output | Direction::Bidirectional => opened.clone(),
+            Direction::Input => self
+                .paired_ump_output(opened)
+                .unwrap_or_else(|| opened.clone()),
+        };
+        for packet in stream_inquiries() {
+            let _ = self.backend.send(&dest, &packet);
+        }
+    }
+
+    fn paired_ump_output(&self, input: &EndpointId) -> Option<EndpointId> {
+        self.endpoints
+            .iter()
+            .find(|e| {
+                e.protocol == ProtocolHint::Ump
+                    && e.direction == Direction::Output
+                    && is_loopback_pair(&input.0, &e.id.0)
+            })
+            .map(|e| e.id.clone())
     }
 
     pub(crate) fn set_thru(
@@ -420,6 +458,10 @@ impl EngineInner {
             }
             let t_ns = self.host_ns();
             self.clock.push(&event.packet, t_ns);
+            self.stream
+                .entry(event.port)
+                .or_default()
+                .feed(&event.packet);
             self.live.push(&event.packet);
             let _ = self.nrpn.push(&event.packet);
             self.mpe.push(&event.packet);
@@ -1010,11 +1052,19 @@ impl EngineInner {
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
                                         activity_dot(ui, self.activity.get(&ep.id.0));
-                                        ui.strong(&ep.name);
+                                        let selected = self.selected_endpoint.as_deref()
+                                            == Some(ep.id.0.as_str());
+                                        if ui.selectable_label(selected, &ep.name).clicked() {
+                                            self.selected_endpoint = Some(ep.id.0.clone());
+                                        }
                                         ui.weak(ep.protocol.label());
                                     });
                                     ui.monospace(&ep.id.0);
                                     ui.label(direction_label(ep.direction));
+                                    if let Some(line) = stream::endpoint_stream_line(self, &ep.id.0)
+                                    {
+                                        ui.weak(line);
+                                    }
                                 });
                             });
                             if let Some(err) = self.port_errors.get(&ep.id.0) {
@@ -1024,6 +1074,7 @@ impl EngineInner {
                     }
                 });
                 mpe::virtual_cables_ui(ui, self);
+                stream::stream_panel(ui, self);
             });
 
         egui::Panel::right("sysex")

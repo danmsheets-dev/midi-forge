@@ -225,6 +225,56 @@ pub enum Decoded {
         kind: crate::flex::FlexTextKind,
         text: String,
     },
+    StreamEndpointDiscovery {
+        filter: u8,
+    },
+    StreamEndpointInfo {
+        midi1: bool,
+        midi2: bool,
+        jr_tx: bool,
+        jr_rx: bool,
+        n_function_blocks: u8,
+    },
+    StreamDeviceIdentity {
+        manufacturer: [u8; 3],
+        family: u16,
+        model: u16,
+    },
+    StreamEndpointName {
+        form: u8,
+        text: String,
+    },
+    StreamProductInstanceId {
+        form: u8,
+        text: String,
+    },
+    StreamConfigurationRequest {
+        protocol: u8,
+        jr_tx: bool,
+        jr_rx: bool,
+    },
+    StreamConfigurationNotification {
+        protocol: u8,
+        jr_tx: bool,
+        jr_rx: bool,
+    },
+    StreamFunctionBlockDiscovery {
+        id: u8,
+        filter: u8,
+    },
+    StreamFunctionBlockInfo {
+        id: u8,
+        first_group: u8,
+        n_groups: u8,
+        midi1: bool,
+        midi2: bool,
+        direction: u8,
+    },
+    StreamFunctionBlockName {
+        id: u8,
+        form: u8,
+        text: String,
+    },
     Other {
         message_type: u8,
         group: u8,
@@ -443,6 +493,69 @@ impl Decoded {
                 ..
             } => format!("Flex key sig sf {sharps_flats} tonic {tonic}"),
             Self::FlexText { kind, text, .. } => format!("Flex {kind:?} {text}"),
+            Self::StreamEndpointDiscovery { filter } => {
+                format!("Stream EP discovery filter {filter:#04X}")
+            }
+            Self::StreamEndpointInfo {
+                midi1,
+                midi2,
+                jr_tx,
+                jr_rx,
+                n_function_blocks,
+            } => format!(
+                "Stream EP info{}{}{}{} {n_function_blocks} FB",
+                if *midi1 { " MIDI1" } else { "" },
+                if *midi2 { " MIDI2" } else { "" },
+                if *jr_tx { " JR tx" } else { "" },
+                if *jr_rx { " JR rx" } else { "" },
+            ),
+            Self::StreamDeviceIdentity {
+                manufacturer,
+                family,
+                model,
+            } => format!(
+                "Stream identity {:02X}:{:02X}:{:02X} family {family} model {model}",
+                manufacturer[0], manufacturer[1], manufacturer[2]
+            ),
+            Self::StreamEndpointName { text, .. } => format!("Stream EP name {text}"),
+            Self::StreamProductInstanceId { text, .. } => format!("Stream product id {text}"),
+            Self::StreamConfigurationRequest {
+                protocol,
+                jr_tx,
+                jr_rx,
+            } => format!(
+                "Stream cfg request MIDI {protocol}{}{}",
+                if *jr_tx { " JR tx" } else { "" },
+                if *jr_rx { " JR rx" } else { "" },
+            ),
+            Self::StreamConfigurationNotification {
+                protocol,
+                jr_tx,
+                jr_rx,
+            } => format!(
+                "Stream cfg MIDI {protocol}{}{}",
+                if *jr_tx { " JR tx" } else { "" },
+                if *jr_rx { " JR rx" } else { "" },
+            ),
+            Self::StreamFunctionBlockDiscovery { id, filter } => {
+                format!("Stream FB discovery id {id} filter {filter:#04X}")
+            }
+            Self::StreamFunctionBlockInfo {
+                id,
+                first_group,
+                n_groups,
+                midi1,
+                midi2,
+                direction,
+            } => format!(
+                "Stream FB {id} groups {first_group}+{n_groups}{}{} {}",
+                if *midi1 { " MIDI1" } else { "" },
+                if *midi2 { " MIDI2" } else { "" },
+                crate::ump_stream::fb_direction_label(*direction),
+            ),
+            Self::StreamFunctionBlockName { id, text, .. } => {
+                format!("Stream FB {id} name {text}")
+            }
             Self::Other {
                 message_type,
                 status,
@@ -495,6 +608,16 @@ impl Decoded {
             Self::FlexMetronome { .. } => "flex_metronome",
             Self::FlexKeySig { .. } => "flex_key_sig",
             Self::FlexText { .. } => "flex_text",
+            Self::StreamEndpointDiscovery { .. } => "stream_ep_discovery",
+            Self::StreamEndpointInfo { .. } => "stream_ep_info",
+            Self::StreamDeviceIdentity { .. } => "stream_device_identity",
+            Self::StreamEndpointName { .. } => "stream_ep_name",
+            Self::StreamProductInstanceId { .. } => "stream_product_id",
+            Self::StreamConfigurationRequest { .. } => "stream_cfg_request",
+            Self::StreamConfigurationNotification { .. } => "stream_cfg",
+            Self::StreamFunctionBlockDiscovery { .. } => "stream_fb_discovery",
+            Self::StreamFunctionBlockInfo { .. } => "stream_fb_info",
+            Self::StreamFunctionBlockName { .. } => "stream_fb_name",
             Self::Other { .. } => "other",
         }
     }
@@ -525,6 +648,7 @@ pub fn decode(msg: &UmpMessage) -> Decoded {
         0x4 => decode_midi2_channel(msg),
         0x5 => decode_data64(group, msg),
         0xD => crate::flex::decode_flex(msg),
+        0xF => crate::ump_stream::decode_stream(msg),
         mt => Decoded::Other {
             message_type: mt,
             group,
