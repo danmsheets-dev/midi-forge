@@ -12,7 +12,7 @@ pub const FLEX_FORM_START: u8 = 1;
 pub const FLEX_FORM_CONTINUE: u8 = 2;
 pub const FLEX_FORM_END: u8 = 3;
 
-/// Address (bits 21–20 of word0): 1 = Group (setup messages).
+/// Address (bits 21–20 of word0): 0 = Channel, 1 = Group (setup messages).
 pub const FLEX_ADDR_GROUP: u8 = 1;
 
 pub const FLEX_BANK_SETUP: u8 = 0;
@@ -114,9 +114,12 @@ pub struct FlexText {
 }
 
 /// Concatenate chunked Flex Data UTF-8 (form start/continue/end).
+///
+/// Open streams are keyed by `(group, addr, channel, bank, status)` so two
+/// channel-addressed lyrics on the same group do not concatenate.
 #[derive(Default)]
 pub struct FlexTextAssembler {
-    streams: HashMap<(u8, u8, u8), Vec<u8>>,
+    streams: HashMap<(u8, u8, u8, u8, u8), Vec<u8>>,
 }
 
 impl FlexTextAssembler {
@@ -138,7 +141,7 @@ impl FlexTextAssembler {
         let Some(kind) = FlexTextKind::from_bank_status(hdr.bank, hdr.status) else {
             return Ok(None);
         };
-        let key = (hdr.group, hdr.bank, hdr.status);
+        let key = (hdr.group, hdr.addr, hdr.channel, hdr.bank, hdr.status);
         let payload = flex_payload12(packet);
         let chunk = payload_until_nul(&payload);
         match hdr.form {
@@ -279,12 +282,16 @@ pub fn flex_set_key_sig(group: u8, sharps_flats: i8, tonic: u8) -> UmpMessage {
     )
 }
 
-/// Lyric (performance text, bank 2 status 1). Splits at 12 UTF-8 bytes.
+/// Lyric (performance text, bank 2 status 1). Splits at 12 UTF-8 bytes,
+/// never mid-code-point.
 pub fn flex_lyric(group: u8, text: &str) -> Vec<UmpMessage> {
     flex_text(group, FlexTextKind::Lyric, text)
 }
 
 /// Flex Data text packets for any Table 16 kind.
+///
+/// Each packet carries at most 12 bytes that are a valid UTF-8 prefix of the
+/// remaining text (floor to the last complete character).
 pub fn flex_text(group: u8, kind: FlexTextKind, text: &str) -> Vec<UmpMessage> {
     let (bank, status) = kind.bank_status();
     let bytes = text.as_bytes();
@@ -301,7 +308,10 @@ pub fn flex_text(group: u8, kind: FlexTextKind, text: &str) -> Vec<UmpMessage> {
     let mut offset = 0;
     let mut first = true;
     while offset < bytes.len() {
-        let take = (bytes.len() - offset).min(TEXT_BYTES_PER_PACKET);
+        let take = utf8_prefix_len(&bytes[offset..], TEXT_BYTES_PER_PACKET);
+        if take == 0 {
+            break;
+        }
         let last = offset + take == bytes.len();
         let form = match (first, last) {
             (true, true) => FLEX_FORM_COMPLETE,
@@ -372,6 +382,8 @@ pub(crate) fn decode_flex(msg: &UmpMessage) -> Decoded {
 struct FlexHeader {
     group: u8,
     form: u8,
+    addr: u8,
+    channel: u8,
     bank: u8,
     status: u8,
 }
@@ -384,6 +396,8 @@ fn flex_header(msg: &UmpMessage) -> Option<FlexHeader> {
     Some(FlexHeader {
         group: ((w0 >> 24) & 0xF) as u8,
         form: ((w0 >> 22) & 0x3) as u8,
+        addr: ((w0 >> 20) & 0x3) as u8,
+        channel: ((w0 >> 16) & 0xF) as u8,
         bank: ((w0 >> 8) & 0xFF) as u8,
         status: (w0 & 0xFF) as u8,
     })
@@ -444,6 +458,15 @@ fn payload_until_nul(bytes: &[u8]) -> &[u8] {
     }
 }
 
+/// Longest prefix of `bytes` no longer than `max` that is valid UTF-8.
+fn utf8_prefix_len(bytes: &[u8], max: usize) -> usize {
+    let n = bytes.len().min(max);
+    match std::str::from_utf8(&bytes[..n]) {
+        Ok(_) => n,
+        Err(err) => err.valid_up_to(),
+    }
+}
+
 fn encode_sharps_flats(sf: i8) -> u8 {
     if sf == 8 { 0x8 } else { (sf as u8) & 0x0F }
 }
@@ -463,6 +486,8 @@ fn decode_sharps_flats(nibble: u8) -> i8 {
 mod tests {
     use super::*;
     use crate::decode::{Decoded, decode};
+
+    const FLEX_ADDR_CHANNEL: u8 = 0;
 
     #[test]
     fn midi2_crate_tempo_fixture() {
@@ -514,5 +539,65 @@ mod tests {
         let end = flex_text_packet(0, FLEX_FORM_END, FLEX_BANK_PERF_TEXT, 0x01, b"x");
         let mut asm = FlexTextAssembler::new();
         assert_eq!(asm.push(&end), Err(SysexError::Framing));
+    }
+
+    fn channel_lyric(group: u8, channel: u8, form: u8, data: &[u8]) -> UmpMessage {
+        let mut payload = [0u8; TEXT_BYTES_PER_PACKET];
+        let n = data.len().min(TEXT_BYTES_PER_PACKET);
+        payload[..n].copy_from_slice(&data[..n]);
+        let word1 = u32::from_be_bytes(payload[0..4].try_into().unwrap());
+        let word2 = u32::from_be_bytes(payload[4..8].try_into().unwrap());
+        let word3 = u32::from_be_bytes(payload[8..12].try_into().unwrap());
+        flex_words(
+            flex_word0(
+                group,
+                form,
+                FLEX_ADDR_CHANNEL,
+                channel,
+                FLEX_BANK_PERF_TEXT,
+                0x01,
+            ),
+            word1,
+            word2,
+            word3,
+        )
+    }
+
+    #[test]
+    fn assembler_channel_addressed_lyrics_do_not_concatenate() {
+        // Two lyric streams on the same group, different channels, must stay separate.
+        let start_ch0 = channel_lyric(3, 0, FLEX_FORM_START, b"Hello");
+        let start_ch1 = channel_lyric(3, 1, FLEX_FORM_START, b"World");
+        let end_ch0 = channel_lyric(3, 0, FLEX_FORM_END, b"!");
+        let end_ch1 = channel_lyric(3, 1, FLEX_FORM_END, b"?");
+        let mut asm = FlexTextAssembler::new();
+        assert!(asm.push(&start_ch0).unwrap().is_none());
+        assert!(asm.push(&start_ch1).unwrap().is_none());
+        let a = asm.push(&end_ch0).unwrap().expect("channel 0 lyric");
+        let b = asm.push(&end_ch1).unwrap().expect("channel 1 lyric");
+        assert_eq!(a.text, "Hello!");
+        assert_eq!(b.text, "World?");
+        assert_eq!(a.kind, FlexTextKind::Lyric);
+        assert_eq!(b.kind, FlexTextKind::Lyric);
+        assert_eq!(a.group, 3);
+        assert_eq!(b.group, 3);
+    }
+
+    #[test]
+    fn flex_text_does_not_split_utf8_code_point() {
+        // 11 ASCII bytes + "é" (U+00E9 = C3 A9) would naively split at byte 12.
+        let text = "abcdefghijké";
+        assert_eq!(text.len(), 13);
+        assert_eq!(&text.as_bytes()[11..], [0xC3, 0xA9]);
+        let pkts = flex_text(0, FlexTextKind::Lyric, text);
+        assert_eq!(pkts.len(), 2);
+        let first_payload = flex_payload12(&pkts[0]);
+        let second_payload = flex_payload12(&pkts[1]);
+        assert_eq!(payload_until_nul(&first_payload), b"abcdefghijk");
+        assert_eq!(payload_until_nul(&second_payload), "é".as_bytes());
+        let mut asm = FlexTextAssembler::new();
+        assert!(asm.push(&pkts[0]).unwrap().is_none());
+        let done = asm.push(&pkts[1]).unwrap().expect("assembled");
+        assert_eq!(done.text, text);
     }
 }
