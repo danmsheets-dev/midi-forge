@@ -15,6 +15,7 @@ cargo run -p midi-forge-app -- help
 cargo run -p midi-forge-app -- send --out "GS Wavetable" note 60 100
 cargo run -p midi-forge-app -- receive --in "MPK" --seconds 3
 cargo run -p midi-forge-app -- clock --out "GS Wavetable" --bpm 120 --seconds 2
+cargo run -p midi-forge-app -- mcp --standalone
 cargo run -p midi-forge-app
 ```
 
@@ -47,6 +48,29 @@ winget install Microsoft.WindowsMIDIServicesSDK
 ```
 
 A COM initializer (`WmsInit`) bootstraps that runtime when it is installed. Live `MidiSession` send/receive still needs the `Microsoft.Windows.Devices.Midi2` winmd projection; without it Midi-Forge keeps the WinMM fallback. See `docs/superpowers/specs/2026-08-26-midi2-roadmap.md`.
+
+**Agent / MCP:** the banner **Agent** checkbox serves technician tools on `http://127.0.0.1:7420/mcp` only (never `0.0.0.0`). **Arm writes** is off by default — without it the agent can only read. Same binary:
+
+```text
+midi-forge mcp
+```
+
+By default that stdio server probes the GUI. If Agent is on, it **attaches** to the live session (does not open a second WinMM stack). If the GUI is down it starts a standalone MIDI session. `--standalone` skips the probe. `--arm` applies only to standalone; when attached, GUI **Arm writes** is the source of truth.
+
+Cursor / Claude Code:
+
+```json
+{
+  "mcpServers": {
+    "midi-forge": {
+      "command": "C:\\\\path\\\\to\\\\midi-forge.exe",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Tools: `list_endpoints`, `monitor_tail`, `live_now`, `clock_health`, `stuck_notes`, `thru_graph`, `mpe_status`, `snapshot`, `send_note`, `send_cc`, `identity`, `panic`, `set_port_open`. No SysEx librarian or PE SET in this version. Do not exclusive-open the same WinMM input from two processes — use attach.
 
 **Record / Play SMF** on the monitor toolbar writes format-0 `.mid` files. **PE GET/SET** and a **Device** library live on the SysEx tab. Lua: `midi.after(ms, ev)`, `midi.state` (saved in the profile), optional `on_idle`. **Net** tab: UDP Network MIDI 2.0 invitation + UMP datagrams (port 5004).
 

@@ -52,7 +52,7 @@ fn print_help() {
   midi-forge panic --out <name>
   midi-forge receive --in <name> [--seconds N]
   midi-forge clock --out <name> [--bpm 120] [--seconds 2]
-  midi-forge mcp [--attach] [--arm] [--mcp-port 7420] [--mcp-url http://127.0.0.1:7420/mcp]
+  midi-forge mcp [--attach] [--standalone] [--arm] [--mcp-port 7420] [--mcp-url http://127.0.0.1:7420/mcp]
 "
     );
 }
