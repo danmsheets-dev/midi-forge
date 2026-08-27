@@ -31,8 +31,17 @@ pub fn inject_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
         ui.add(egui::DragValue::new(&mut app.inject_octave).range(-2..=4));
         ui.label("Vel");
         ui.add(egui::DragValue::new(&mut app.inject_velocity).range(1..=127));
+        ui.label("Group");
+        ui.add(egui::DragValue::new(&mut app.inject_group).range(0..=15));
         ui.checkbox(&mut app.inject_m2, "MIDI 2")
             .on_hover_text("16-bit velocity / 32-bit CC on UMP outputs and loopbacks");
+        if app.inject_m2 {
+            ui.label("Attr");
+            ui.add(egui::DragValue::new(&mut app.inject_attr).range(0..=3))
+                .on_hover_text(
+                    "Note attribute type: 0 none, 1 manufacturer, 2 profile, 3 pitch 7.9",
+                );
+        }
     });
 
     let outputs: Vec<(String, String)> = app
@@ -84,6 +93,41 @@ pub fn inject_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
             send_cc(app, app.inject_cc_val);
         }
     });
+
+    if app.inject_m2 {
+        ui.horizontal(|ui| {
+            ui.label("PN bend");
+            ui.add(egui::DragValue::new(&mut app.inject_pn_note).range(0..=127));
+            ui.add(
+                egui::DragValue::new(&mut app.inject_pn_val)
+                    .hexadecimal(8, false, false)
+                    .prefix("0x"),
+            );
+            if ui.small_button("Send").clicked() {
+                send_pn_bend(app);
+            }
+            ui.separator();
+            ui.label("RC");
+            ui.add(
+                egui::DragValue::new(&mut app.inject_rc_bank)
+                    .range(0..=127)
+                    .prefix("b"),
+            );
+            ui.add(
+                egui::DragValue::new(&mut app.inject_rc_index)
+                    .range(0..=127)
+                    .prefix("i"),
+            );
+            ui.add(
+                egui::DragValue::new(&mut app.inject_rc_val)
+                    .hexadecimal(8, false, false)
+                    .prefix("0x"),
+            );
+            if ui.small_button("Send RC").clicked() {
+                send_rc(app);
+            }
+        });
+    }
 }
 
 fn piano(ui: &mut egui::Ui, app: &mut EngineInner) {
@@ -162,37 +206,63 @@ fn piano(ui: &mut egui::Ui, app: &mut EngineInner) {
 
 fn send_note(app: &mut EngineInner, note: u8, on: bool) {
     let ch = app.inject_channel.saturating_sub(1).min(15);
+    let group = app.inject_group.min(15);
     let packet = if app.inject_m2 {
         let vel = if on {
             midi_forge_core::velocity7_to_16(app.inject_velocity.min(127))
         } else {
             0
         };
+        let attr = app.inject_attr.min(3);
         if on {
-            midi_forge_core::midi2_note_on(0, ch, note.min(127), vel)
+            midi_forge_core::midi2_note_on_attr(group, ch, note.min(127), vel, attr, 0)
         } else {
-            midi_forge_core::midi2_note_off(0, ch, note.min(127), vel)
+            midi_forge_core::midi2_note_off_attr(group, ch, note.min(127), vel, attr, 0)
         }
     } else {
         let vel = if on { app.inject_velocity.min(127) } else { 0 };
         let status = if on { 0x90 } else { 0x80 } | ch;
-        UmpMessage::midi1_channel_voice(0, status, note.min(127), vel)
+        UmpMessage::midi1_channel_voice(group, status, note.min(127), vel)
     };
     send_inject(app, packet);
 }
 
 fn send_cc(app: &mut EngineInner, value: u8) {
     let ch = app.inject_channel.saturating_sub(1).min(15);
+    let group = app.inject_group.min(15);
     let packet = if app.inject_m2 {
         midi_forge_core::midi2_cc(
-            0,
+            group,
             ch,
             app.inject_cc.min(127),
             midi_forge_core::value7_to_32(value),
         )
     } else {
-        UmpMessage::midi1_channel_voice(0, 0xB0 | ch, app.inject_cc.min(127), value.min(127))
+        UmpMessage::midi1_channel_voice(group, 0xB0 | ch, app.inject_cc.min(127), value.min(127))
     };
+    send_inject(app, packet);
+}
+
+fn send_pn_bend(app: &mut EngineInner) {
+    let ch = app.inject_channel.saturating_sub(1).min(15);
+    let packet = midi_forge_core::midi2_per_note_pitch_bend(
+        app.inject_group.min(15),
+        ch,
+        app.inject_pn_note.min(127),
+        app.inject_pn_val,
+    );
+    send_inject(app, packet);
+}
+
+fn send_rc(app: &mut EngineInner) {
+    let ch = app.inject_channel.saturating_sub(1).min(15);
+    let packet = midi_forge_core::midi2_registered_controller(
+        app.inject_group.min(15),
+        ch,
+        app.inject_rc_bank.min(127),
+        app.inject_rc_index.min(127),
+        app.inject_rc_val,
+    );
     send_inject(app, packet);
 }
 

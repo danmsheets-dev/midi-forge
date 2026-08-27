@@ -431,10 +431,11 @@ fn table_to_event(table: &Table, fallback: &MidiEvent) -> Result<MidiEvent, Scri
     let data1 = lua_u8(table, "data1", fallback.packet.data1())?;
     let data2 = lua_u8(table, "data2", fallback.packet.data2())?;
     let packet = if mt == 0x4 {
-        let w1 = table
-            .get::<Option<u32>>("word1")?
-            .or_else(|| fallback.packet.words().get(1).copied())
-            .unwrap_or(0);
+        let w1 = lua_u32(
+            table,
+            "word1",
+            fallback.packet.words().get(1).copied().unwrap_or(0),
+        )?;
         UmpMessage::midi2_channel_voice(group, status, data1, data2, w1)
     } else if mt == 0x1 {
         UmpMessage::midi1_system(group, status, data1, data2)
@@ -627,5 +628,46 @@ mod tests {
         e2.import_state(&json);
         let json2 = e2.export_state();
         assert!(json2.contains('3') || json2.contains("n") || json2 == "{}");
+    }
+
+    #[test]
+    fn m2_note_on_prelude_is_type_4() {
+        let mut e = load(
+            r#"
+            function on_midi(ev)
+              return midi.m2_note_on(4, 48, 0x8000, 2)
+            end
+            "#,
+        );
+        let out = e.process(&note());
+        assert_eq!(out.len(), 1);
+        let p = out[0].packet;
+        assert_eq!(p.message_type(), 4);
+        assert_eq!(p.group(), 2);
+        assert_eq!(p.status_byte(), 0x94);
+        assert_eq!(p.data1(), 48);
+        assert_eq!(p.data2(), 0);
+        assert_eq!(p.words()[1] >> 16, 0x8000);
+    }
+
+    #[test]
+    fn m2_note_off_and_cc_prelude() {
+        let mut e = load(
+            r#"
+            function on_midi(ev)
+              return midi.m2_note_off(1, 60, 0x1000, 0), midi.m2_cc(3, 7, 0x80000000, 1)
+            end
+            "#,
+        );
+        let out = e.process(&note());
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].packet.message_type(), 4);
+        assert_eq!(out[0].packet.status_byte(), 0x81);
+        assert_eq!(out[0].packet.words()[1] >> 16, 0x1000);
+        assert_eq!(out[1].packet.message_type(), 4);
+        assert_eq!(out[1].packet.status_byte(), 0xB3);
+        assert_eq!(out[1].packet.data1(), 7);
+        assert_eq!(out[1].packet.group(), 1);
+        assert_eq!(out[1].packet.words()[1], 0x8000_0000);
     }
 }

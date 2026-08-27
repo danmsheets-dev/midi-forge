@@ -60,3 +60,57 @@ function midi.pitch_bend(ch, lsb, msb, group)
     kind = "pitch_bend",
   }
 end
+
+local function u16(v)
+  return math.floor(tonumber(v) or 0) % 65536
+end
+
+local function u32(v)
+  v = math.floor(tonumber(v) or 0)
+  if v < 0 then
+    v = 0
+  end
+  return v % 4294967296
+end
+
+function midi.m2_note_on(ch, note, vel16, group)
+  ch = chn(ch)
+  return {
+    type = 4,
+    group = group or 0,
+    status = 0x90 + ch,
+    channel = ch,
+    data1 = note,
+    data2 = 0,
+    word1 = u16(vel16) << 16,
+    kind = "m2_note_on",
+  }
+end
+
+function midi.m2_note_off(ch, note, vel16, group)
+  ch = chn(ch)
+  return {
+    type = 4,
+    group = group or 0,
+    status = 0x80 + ch,
+    channel = ch,
+    data1 = note,
+    data2 = 0,
+    word1 = u16(vel16 or 0) << 16,
+    kind = "m2_note_off",
+  }
+end
+
+function midi.m2_cc(ch, cc, val, group)
+  ch = chn(ch)
+  return {
+    type = 4,
+    group = group or 0,
+    status = 0xB0 + ch,
+    channel = ch,
+    data1 = cc,
+    data2 = 0,
+    word1 = u32(val),
+    kind = "m2_cc",
+  }
+end

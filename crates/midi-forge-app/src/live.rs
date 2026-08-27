@@ -47,12 +47,22 @@ pub fn live_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
                     ui.colored_label(n_col, format!("{:>2}", ch.sounding));
                     ui.monospace(format!("{:>3}", ch.program));
                     if let Some((cc, val)) = ch.last_cc {
-                        ui.monospace(format!("{} {val}", cc_label(cc)));
+                        let resp = ui.monospace(format!("{} {val}", cc_label(cc)));
+                        if let Some((_, v32)) = ch.last_cc32 {
+                            resp.on_hover_text(format!("{v32:#010x}"));
+                        }
                     } else {
                         ui.weak("—");
                     }
                     ui.monospace(format!("{:>5}", ch.bend));
-                    let frac = f32::from(ch.last_vel) / 127.0;
+                    if let Some((note, bend)) = ch.pn_bend {
+                        ui.weak(format!("pn{note} {bend:#x}"));
+                    }
+                    let frac = if ch.last_vel16 > 0 {
+                        f32::from(ch.last_vel16) / 65535.0
+                    } else {
+                        f32::from(ch.last_vel) / 127.0
+                    };
                     let (bar, _) =
                         ui.allocate_exact_size(egui::vec2(40.0, row_h - 4.0), egui::Sense::hover());
                     ui.painter()

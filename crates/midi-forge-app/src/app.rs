@@ -95,6 +95,13 @@ pub(crate) struct EngineInner {
     pub(crate) master: ClockMaster,
     pub(crate) master_dest: Option<String>,
     pub(crate) inject_m2: bool,
+    pub(crate) inject_group: u8,
+    pub(crate) inject_attr: u8,
+    pub(crate) inject_pn_note: u8,
+    pub(crate) inject_pn_val: u32,
+    pub(crate) inject_rc_bank: u8,
+    pub(crate) inject_rc_index: u8,
+    pub(crate) inject_rc_val: u32,
     pub(crate) recorder: SessionRecorder,
     pub(crate) pe_header: String,
     pub(crate) pe_body: String,
@@ -209,6 +216,13 @@ impl EngineInner {
             master: ClockMaster::new(),
             master_dest: None,
             inject_m2: false,
+            inject_group: 0,
+            inject_attr: 0,
+            inject_pn_note: 60,
+            inject_pn_val: 0x8000_0000,
+            inject_rc_bank: 0,
+            inject_rc_index: 6,
+            inject_rc_val: 0x8000_0000,
             recorder: SessionRecorder::default(),
             pe_header: r#"{"resource":"DeviceInfo"}"#.into(),
             pe_body: String::new(),
@@ -332,6 +346,17 @@ impl EngineInner {
             .unwrap_or_else(|| id.0.clone());
         self.port_names.insert(port, name);
         port
+    }
+
+    /// Banner: native UMP only when the backend can pass UMP *and* the
+    /// selected dest is a UMP endpoint. WinMM dests stay MIDI 1 wire.
+    fn selected_dest_is_ump(&self) -> bool {
+        let id = self
+            .selected_endpoint
+            .as_ref()
+            .or(self.inject_dest.as_ref());
+        id.and_then(|id| self.endpoints.iter().find(|e| e.id.0 == *id))
+            .is_some_and(|e| e.protocol == ProtocolHint::Ump)
     }
 
     pub(crate) fn set_input_open(&mut self, id: &EndpointId, open: bool) -> Result<(), String> {
@@ -991,15 +1016,16 @@ impl EngineInner {
                         );
                     }
                     let caps = self.backend.caps();
-                    if caps.native_ump {
+                    let dest_ump = self.selected_dest_is_ump();
+                    if caps.native_ump && dest_ump {
                         ui.colored_label(egui::Color32::from_rgb(80, 180, 140), "native UMP")
                             .on_hover_text(
-                                "This backend can pass Universal MIDI Packets. WinMM still downscales to MIDI 1.",
+                                "Selected dest is UMP. This backend passes Universal MIDI Packets natively.",
                             );
                     } else {
                         ui.weak("MIDI 1 wire")
                             .on_hover_text(
-                                "WinMM downscales MIDI 2 to 7-bit. Loopbacks and a future MidiSession keep UMP. See docs/superpowers/specs/2026-08-26-midi2-roadmap.md",
+                                "WinMM stays MIDI 1 wire. native UMP requires a UMP dest (loopback/CoreMIDI MIDI 2).",
                             );
                     }
                     ui.weak(format!("backend: {}", self.backend_name))
