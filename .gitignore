@@ -1,4 +1,6 @@
 /target
+/dist
+vendor/*.h
 **/*.rs.bk
 Cargo.lock.bak
 .idea/

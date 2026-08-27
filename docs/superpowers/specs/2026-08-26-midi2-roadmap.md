@@ -1,16 +1,16 @@
 # Midi-Forge MIDI 2.0 + 15-feature roadmap
 
 Date: 2026-08-26 (updated 2026-08-27)  
-Status: accepted — Full MIDI 2 **language** is done; live `MidiSession` I/O is still a stub  
+Status: accepted — Full MIDI 2 **language** is done; live `MidiSession` I/O is bound (needs App SDK at runtime)  
 Product: Midi-Forge 0.1 → 0.2
 
-Phase 1 of the first five features shipped first. Full MIDI 2.0 decode/construct for every defined UMP type is now in tree (see table). Native WinRT `MidiSession` send/receive is **not** bound: `WmsInit` COM-bootstraps the App SDK when installed (`winget install Microsoft.WindowsMIDIServicesSDK`); without a `Microsoft.Windows.Devices.Midi2` winmd projection, `WmsBackend::try_new` fails and WinMM remains the fallback.
+Phase 1 of the first five features shipped first. Full MIDI 2.0 decode/construct for every defined UMP type is now in tree (see table). Native WinRT `MidiSession` send/receive is bound from the vendored `Windows.Devices.Midi2` winmd: `WmsInit` COM-bootstraps the App SDK (`winget install Microsoft.WindowsMIDIServicesSDK`), then `WmsBackend::try_new` activates `MidiSession`. If WinRT activation fails, WinMM remains the fallback — the backend never claims `native_ump` without a live session.
 
 ## First five (this upgrade series)
 
 | # | Feature | Phase 1 (this PR) | Later |
 |---|---------|-------------------|--------|
-| 1 | Native WMS `MidiSession` | `BackendCaps`, UMP-preserving loopback, WinMM stays 7-bit fallback | **stub:** COM initializer exists; live session / scheduled send / DAW-visible UMP devices need winmd projection |
+| 1 | Native WMS `MidiSession` | `BackendCaps`, UMP-preserving loopback, WinMM stays 7-bit fallback | **done:** live `MidiSession` enumerate/open/send/receive (COM raw words). Scheduled send still later. Runtime requires App SDK. |
 | 2 | Engine thread | Dedicated `midi-engine` thread owns backend poll/send + clock master; UI snapshots | Lua timers on the same thread |
 | 3 | MIDI 2 language | Decode + construct per-note, registered/assignable controllers; 32-bit maps; inject M2 | **done:** Flex Data, MixData, JR timestamps, UMP Stream / function blocks |
 | 4 | Clock master | Generate clock / start / stop / continue / SPP to a chosen output | Clock fallback if input dies, tap tempo, MTC generate |
@@ -46,6 +46,6 @@ Canonical event remains `UmpMessage`. Completeness checklist:
 | 0xD | Flex Data | Other | **done** (tempo, lyrics, time sig) |
 | 0xF | UMP Stream | Other | **done** (endpoint discovery, function blocks, protocol negotiation) |
 
-I/O: MIDI 1 endpoints (WinMM) downscale type 0x4 → 0x2. UMP dests (in-app loopback, CoreMIDI MIDI 2) pass type 0x4 unchanged (`packets_for_wire` / `BackendCaps.native_ump`). `WmsBackend` is a stub until the winmd projection exists.
+I/O: MIDI 1 endpoints (WinMM) downscale type 0x4 → 0x2. UMP dests (WMS `MidiSession`, in-app loopback, CoreMIDI MIDI 2) pass type 0x4 unchanged (`packets_for_wire` / `BackendCaps.native_ump`). `WmsBackend::try_new` fails closed to WinMM when the App SDK is not registered.
 
 Property Exchange (full JSON GET/SET), Network MIDI 2.0 session state, and MIDI Clip File / SMF2 remain out of this MIDI 2 language pass.

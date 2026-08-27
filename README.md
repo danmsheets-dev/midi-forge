@@ -47,7 +47,7 @@ Windows MIDI Services App SDK (optional):
 winget install Microsoft.WindowsMIDIServicesSDK
 ```
 
-A COM initializer (`WmsInit`) bootstraps that runtime when it is installed. Live `MidiSession` send/receive still needs the `Microsoft.Windows.Devices.Midi2` winmd projection; without it Midi-Forge keeps the WinMM fallback. See `docs/superpowers/specs/2026-08-26-midi2-roadmap.md`.
+A COM initializer (`WmsInit`) bootstraps that runtime when it is installed. `default_backend()` then activates a live `MidiSession` (native UMP enumerate/open/send/receive). If the App SDK is missing, WinRT activation fails and Midi-Forge keeps the WinMM fallback — it never fakes a UMP session. See `docs/superpowers/specs/2026-08-26-midi2-roadmap.md`.
 
 **Agent / MCP:** the banner **Agent** checkbox serves technician tools on `http://127.0.0.1:7420/mcp` only (never `0.0.0.0`). **Arm writes** is off by default — without it the agent can only read. Same binary:
 

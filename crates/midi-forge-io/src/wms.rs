@@ -25,7 +25,7 @@ pub fn probe_wms() -> WmsStatus {
             || which_midi();
         let summary = match (midisrv, midi_cli) {
             (true, true) => {
-                "MidiSrv + midi.exe. Native UMP uses WmsBackend when MidiSession activates; otherwise WinMM fallback."
+                "MidiSrv + midi.exe. Native UMP uses WmsBackend (MidiSession) when the App SDK activates; otherwise WinMM fallback."
                     .into()
             }
             (true, false) => {

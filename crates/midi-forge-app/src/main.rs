@@ -17,7 +17,8 @@ use midi_forge_io::{Direction, MidiBackend, default_backend};
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("mcp") {
-        attach_parent_console();
+        // Do not AttachConsole / freopen CONIN$: that steals the MCP stdin pipe
+        // when a parent terminal exists (Cursor, `cargo run`, this smoke test).
         std::process::exit(mcp::stdio::run(&args));
     }
     if args.iter().any(|a| a == "--list") {
