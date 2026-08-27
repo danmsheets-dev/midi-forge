@@ -93,7 +93,10 @@ pub trait MidiBackend: Send {
 pub fn default_backend() -> Box<dyn MidiBackend> {
     #[cfg(windows)]
     {
-        Box::new(crate::winmm::WinMmBackend::new())
+        match crate::wms_session::WmsBackend::try_new() {
+            Ok(wms) => Box::new(wms),
+            Err(_) => Box::new(crate::winmm::WinMmBackend::new()),
+        }
     }
     #[cfg(target_os = "macos")]
     {

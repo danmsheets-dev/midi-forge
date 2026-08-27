@@ -12,6 +12,9 @@ mod wms;
 #[cfg(windows)]
 mod winmm;
 
+#[cfg(windows)]
+mod wms_session;
+
 #[cfg(target_os = "macos")]
 #[path = "coremidi.rs"]
 mod coremidi_backend;
@@ -29,6 +32,9 @@ pub use wms::{WmsStatus, create_wms_loopback, midi_cli_path, probe_wms};
 
 #[cfg(windows)]
 pub use winmm::{WinMmBackend, midisrv_running};
+
+#[cfg(windows)]
+pub use wms_session::{WmsBackend, WmsInit};
 
 #[cfg(target_os = "macos")]
 pub use coremidi_backend::CoreMidiBackend;

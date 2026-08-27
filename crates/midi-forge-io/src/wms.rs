@@ -1,5 +1,6 @@
-//! Windows MIDI Services diagnostics. Native MidiSession I/O needs the App SDK
-//! projection (WinRT / NuGet), which is not a crates.io crate.
+//! Windows MIDI Services diagnostics (`MidiSrv` / `midi.exe`).
+//! Native UMP I/O is `WmsBackend` (`wms_session.rs`) when the App SDK
+//! `MidiSession` activates; otherwise WinMM is the fallback.
 
 #[cfg(windows)]
 use crate::winmm::midisrv_running;
@@ -24,7 +25,7 @@ pub fn probe_wms() -> WmsStatus {
             || which_midi();
         let summary = match (midisrv, midi_cli) {
             (true, true) => {
-                "MidiSrv + midi.exe. WinMM is multi-client via the service. Native UMP MidiSession still needs the App SDK runtime."
+                "MidiSrv + midi.exe. Native UMP uses WmsBackend when MidiSession activates; otherwise WinMM fallback."
                     .into()
             }
             (true, false) => {

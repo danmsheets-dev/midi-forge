@@ -1876,6 +1876,7 @@ dependencies = [
  "coremidi",
  "midi-forge-core",
  "thiserror 2.0.20",
+ "windows",
 ]
 
 [[package]]
