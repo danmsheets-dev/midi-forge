@@ -18,6 +18,7 @@ pub enum MessageKind {
     Reset,
     SystemCommon,
     PerNote,
+    Utility,
     Other,
 }
 
@@ -44,6 +45,7 @@ pub fn message_kind(msg: &UmpMessage) -> MessageKind {
             0x60 => MessageKind::PitchBend,
             _ => MessageKind::Other,
         },
+        0x0 => MessageKind::Utility,
         0x3 => MessageKind::Sysex,
         0x1 => match msg.status_byte() {
             0xF8 => MessageKind::Clock,
@@ -77,6 +79,9 @@ pub struct Filter {
     /// MIDI 2 per-note controllers, per-note bend is pitch_bend.
     #[serde(default = "default_true")]
     pub per_note: bool,
+    /// UMP Utility (type 0x0): NOOP, JR clock/timestamp, DCTPQ, delta clockstamp.
+    #[serde(default = "default_true")]
+    pub utility: bool,
     /// Bit `i` enables MIDI channel `i` (0–15).
     pub channels: u16,
     /// If set, rewrite channel-voice packets to this channel after the mask.
@@ -100,6 +105,7 @@ impl Default for Filter {
             system_common: true,
             other: true,
             per_note: true,
+            utility: true,
             channels: 0xFFFF,
             force_channel: None,
         }
@@ -144,6 +150,7 @@ impl Filter {
             MessageKind::Reset => self.reset,
             MessageKind::SystemCommon => self.system_common,
             MessageKind::PerNote => self.per_note,
+            MessageKind::Utility => self.utility,
             MessageKind::Other => self.other,
         }
     }
@@ -267,5 +274,29 @@ mod tests {
         };
         assert_eq!(f.apply(&pn), None);
         assert!(Filter::default().apply(&pn).is_some());
+    }
+
+    #[test]
+    fn default_passes_utility_jr() {
+        let jr = UmpMessage::from_word(0x0020_0100).unwrap();
+        assert_eq!(message_kind(&jr), MessageKind::Utility);
+        assert_eq!(Filter::default().apply(&jr), Some(jr));
+        let drop_other = Filter {
+            other: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_other.apply(&jr), Some(jr));
+        let drop_utility = Filter {
+            utility: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_utility.apply(&jr), None);
+    }
+
+    #[test]
+    fn missing_utility_field_defaults_true() {
+        let json = r#"{"notes":true,"poly_pressure":true,"control_change":true,"program_change":true,"channel_pressure":true,"pitch_bend":true,"sysex":true,"clock":true,"transport":true,"active_sensing":true,"reset":true,"system_common":true,"other":true,"per_note":true,"channels":65535,"force_channel":null}"#;
+        let f: Filter = serde_json::from_str(json).unwrap();
+        assert!(f.utility);
     }
 }

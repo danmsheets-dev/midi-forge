@@ -30,6 +30,7 @@ mod smf;
 mod sysex;
 mod timing;
 mod ump;
+mod utility;
 
 pub use cc::{cc_label, cc_name};
 pub use clock_master::ClockMaster;
@@ -80,3 +81,4 @@ pub use sysex::{
 };
 pub use timing::{ClockHealth, IntervalHist, MtcState, Transport};
 pub use ump::UmpMessage;
+pub use utility::{ump_dctpq, ump_delta_clockstamp, ump_jr_clock, ump_jr_timestamp, ump_noop};

@@ -169,6 +169,19 @@ pub enum Decoded {
         note: u8,
         flags: u8,
     },
+    Noop,
+    JrClock {
+        ticks: u16,
+    },
+    JrTimestamp {
+        ticks: u16,
+    },
+    Dctpq {
+        ticks_per_qn: u16,
+    },
+    DeltaClockstamp {
+        ticks: u16,
+    },
     Other {
         message_type: u8,
         group: u8,
@@ -355,6 +368,11 @@ impl Decoded {
                 "Ch{} M2 PN Mgmt note {note} flags {flags:#04X}",
                 channel + 1
             ),
+            Self::Noop => "NOOP".to_string(),
+            Self::JrClock { ticks } => format!("JR Clock {ticks}"),
+            Self::JrTimestamp { ticks } => format!("JR Timestamp {ticks}"),
+            Self::Dctpq { ticks_per_qn } => format!("DCTPQ {ticks_per_qn}"),
+            Self::DeltaClockstamp { ticks } => format!("Delta Clockstamp {ticks}"),
             Self::Other {
                 message_type,
                 status,
@@ -395,6 +413,11 @@ impl Decoded {
             Self::Midi2RegisteredPerNote { .. } => "m2_pn_rc",
             Self::Midi2AssignablePerNote { .. } => "m2_pn_ac",
             Self::Midi2PerNoteManagement { .. } => "m2_pn_mgmt",
+            Self::Noop => "noop",
+            Self::JrClock { .. } => "jr_clock",
+            Self::JrTimestamp { .. } => "jr_timestamp",
+            Self::Dctpq { .. } => "dctpq",
+            Self::DeltaClockstamp { .. } => "delta_clockstamp",
             Self::Other { .. } => "other",
         }
     }
@@ -418,6 +441,7 @@ fn midi2_note_summary(
 pub fn decode(msg: &UmpMessage) -> Decoded {
     let group = msg.group();
     match msg.message_type() {
+        0x0 => decode_utility(msg),
         0x1 => decode_system(msg),
         0x2 => decode_midi1_channel(group, msg.words()[0]),
         0x3 => decode_sysex7(group, msg),
@@ -426,6 +450,24 @@ pub fn decode(msg: &UmpMessage) -> Decoded {
             message_type: mt,
             group,
             status: msg.status_byte(),
+        },
+    }
+}
+
+fn decode_utility(msg: &UmpMessage) -> Decoded {
+    let ticks = (msg.words()[0] & 0xFFFF) as u16;
+    match msg.status_byte() {
+        0x00 => Decoded::Noop,
+        0x10 => Decoded::JrClock { ticks },
+        0x20 => Decoded::JrTimestamp { ticks },
+        0x30 => Decoded::Dctpq {
+            ticks_per_qn: ticks,
+        },
+        0x40 => Decoded::DeltaClockstamp { ticks },
+        other => Decoded::Other {
+            message_type: 0x0,
+            group: msg.group(),
+            status: other,
         },
     }
 }
@@ -755,5 +797,82 @@ mod tests {
         assert_eq!(decode(&pnb).kind_key(), "m2_pn_bend");
         let pnrc = midi2_registered_per_note(0, 0, 64, 7, 99);
         assert_eq!(decode(&pnrc).kind_key(), "m2_pn_rc");
+    }
+
+    #[test]
+    fn jr_timestamp_decodes() {
+        let w = 0x0020_0100u32; // mt 0, status 2, jr 0x0100
+        let m = UmpMessage::from_word(w).unwrap();
+        assert_eq!(crate::decode(&m).kind_key(), "jr_timestamp");
+    }
+
+    #[test]
+    fn utility_messages_decode() {
+        let noop = UmpMessage::from_word(0x0000_0000).unwrap();
+        assert_eq!(decode(&noop), Decoded::Noop);
+        assert_eq!(decode(&noop).kind_key(), "noop");
+        assert_eq!(decode(&noop).summary(), "NOOP");
+
+        let clock = UmpMessage::from_word(0x0010_00AB).unwrap();
+        assert_eq!(decode(&clock), Decoded::JrClock { ticks: 0x00AB });
+        assert_eq!(decode(&clock).kind_key(), "jr_clock");
+        assert_eq!(decode(&clock).summary(), "JR Clock 171");
+
+        let ts = UmpMessage::from_word(0x0020_0100).unwrap();
+        assert_eq!(decode(&ts), Decoded::JrTimestamp { ticks: 0x0100 });
+        assert_eq!(decode(&ts).summary(), "JR Timestamp 256");
+
+        let dctpq = UmpMessage::from_word(0x0030_01E0).unwrap();
+        assert_eq!(decode(&dctpq), Decoded::Dctpq { ticks_per_qn: 480 });
+        assert_eq!(decode(&dctpq).kind_key(), "dctpq");
+        assert_eq!(decode(&dctpq).summary(), "DCTPQ 480");
+
+        let dc = UmpMessage::from_word(0x0040_0010).unwrap();
+        assert_eq!(decode(&dc), Decoded::DeltaClockstamp { ticks: 16 });
+        assert_eq!(decode(&dc).kind_key(), "delta_clockstamp");
+        assert_eq!(decode(&dc).summary(), "Delta Clockstamp 16");
+    }
+
+    #[test]
+    fn unknown_utility_status_is_other() {
+        let m = UmpMessage::from_word(0x0050_0001).unwrap();
+        assert_eq!(
+            decode(&m),
+            Decoded::Other {
+                message_type: 0x0,
+                group: 0,
+                status: 0x50
+            }
+        );
+    }
+
+    #[test]
+    fn utility_constructors_roundtrip() {
+        use crate::{ump_dctpq, ump_delta_clockstamp, ump_jr_clock, ump_jr_timestamp, ump_noop};
+
+        let noop = ump_noop();
+        assert_eq!(noop.message_type(), 0x0);
+        assert_eq!(noop.status_byte(), 0x00);
+        assert_eq!(noop.words()[0], 0x0000_0000);
+        assert_eq!(decode(&noop), Decoded::Noop);
+
+        let clock = ump_jr_clock(0x1234);
+        assert_eq!(clock.words()[0], 0x0010_1234);
+        assert_eq!(clock.status_byte(), 0x10);
+        assert_eq!(decode(&clock), Decoded::JrClock { ticks: 0x1234 });
+
+        let ts = ump_jr_timestamp(0x0100);
+        assert_eq!(ts.words()[0], 0x0020_0100);
+        assert_eq!(ts.status_byte(), 0x20);
+        assert_eq!(decode(&ts), Decoded::JrTimestamp { ticks: 0x0100 });
+        assert_eq!(decode(&ts).kind_key(), "jr_timestamp");
+
+        let dctpq = ump_dctpq(480);
+        assert_eq!(dctpq.words()[0], 0x0030_01E0);
+        assert_eq!(decode(&dctpq), Decoded::Dctpq { ticks_per_qn: 480 });
+
+        let dc = ump_delta_clockstamp(16);
+        assert_eq!(dc.words()[0], 0x0040_0010);
+        assert_eq!(decode(&dc), Decoded::DeltaClockstamp { ticks: 16 });
     }
 }
