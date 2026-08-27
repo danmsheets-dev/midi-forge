@@ -15,8 +15,7 @@ use super::tools;
 
 const DEFAULT_PROBE_HOST: &str = "127.0.0.1";
 const ATTACH_FAIL: &str = "GUI MCP not listening; standalone session";
-const GUI_LISTENING: &str =
-    "GUI MCP is listening; this process is still standalone until attach proxy";
+const ATTACHED: &str = "attached to GUI MCP session";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpFlags {
@@ -41,8 +40,8 @@ impl Default for McpFlags {
     }
 }
 
-/// Parse `midi-forge mcp` flags. `--mcp-url` is stored for Task 4; host/port
-/// feed the TCP probe (always, unless `--standalone`).
+/// Parse `midi-forge mcp` flags. `--mcp-url` is the attach HTTP target
+/// (`/mcp`); host/port also feed the TCP probe (unless `--standalone`).
 pub fn parse_mcp_flags(args: &[String]) -> Result<McpFlags, String> {
     let mut i = 0usize;
     if args
@@ -158,38 +157,73 @@ async fn serve(flags: McpFlags) -> Result<(), String> {
     } else {
         Some(probe_gui(&flags.probe_host, flags.mcp_port).await)
     };
-    let (auto_open, notice) = session_plan(&flags, gui_listening);
-    if let Some(msg) = notice {
+    let plan = session_plan(&flags, gui_listening);
+    if let Some(msg) = plan.notice {
         eprintln!("{msg}");
     }
 
-    // GUI present: do not open OS inputs (WinMM exclusive-open). Null backend
-    // until Task 4 attach proxy; `from_default()` always auto-opens.
-    let mut host = if auto_open {
-        StandaloneHost::from_default()
-    } else {
-        StandaloneHost::with_null()
-    };
-    if flags.arm {
-        host.set_armed(true);
+    match plan.kind {
+        SessionKind::Attach => {
+            // Stdio `--arm` cannot override GUI **Arm writes** (safer): the GUI
+            // is source of truth. Writes succeed only if the GUI checkbox is on.
+            let uri = mcp_http_uri(&flags);
+            super::attach::serve_stdio(&uri).await
+        }
+        SessionKind::Standalone => {
+            // Own MidiBackend. Auto-open inputs. WinMM exclusive-open: never
+            // take this path while the GUI already holds the ports (Attach).
+            let mut host = StandaloneHost::from_default();
+            if flags.arm {
+                host.set_armed(true);
+            }
+            let server = ForgeMcp::new(host);
+            let running = server
+                .serve(rmcp::transport::stdio())
+                .await
+                .map_err(|e| e.to_string())?;
+            running.waiting().await.map_err(|e| e.to_string())?;
+            Ok(())
+        }
     }
-    let server = ForgeMcp::new(host);
-    let running = server
-        .serve(rmcp::transport::stdio())
-        .await
-        .map_err(|e| e.to_string())?;
-    running.waiting().await.map_err(|e| e.to_string())?;
-    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionKind {
+    /// HTTP MCP client to the live GUI. Do not construct a second MIDI stack.
+    Attach,
+    /// `StandaloneHost::from_default()` and auto-open inputs.
+    Standalone,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SessionPlan {
+    kind: SessionKind,
+    notice: Option<&'static str>,
 }
 
 /// `gui_listening` is `None` when `--standalone` skipped the TCP probe.
-/// Returns `(auto_open_inputs, stderr_notice)`.
-fn session_plan(flags: &McpFlags, gui_listening: Option<bool>) -> (bool, Option<&'static str>) {
+fn session_plan(flags: &McpFlags, gui_listening: Option<bool>) -> SessionPlan {
     match gui_listening {
-        Some(true) => (false, Some(GUI_LISTENING)),
-        Some(false) if flags.attach => (true, Some(ATTACH_FAIL)),
-        _ => (true, None),
+        Some(true) => SessionPlan {
+            kind: SessionKind::Attach,
+            notice: Some(ATTACHED),
+        },
+        Some(false) if flags.attach => SessionPlan {
+            kind: SessionKind::Standalone,
+            notice: Some(ATTACH_FAIL),
+        },
+        _ => SessionPlan {
+            kind: SessionKind::Standalone,
+            notice: None,
+        },
     }
+}
+
+fn mcp_http_uri(flags: &McpFlags) -> String {
+    flags
+        .mcp_url
+        .clone()
+        .unwrap_or_else(|| format!("http://{}:{}/mcp", flags.probe_host, flags.mcp_port))
 }
 
 async fn probe_gui(host: &str, port: u16) -> bool {
@@ -512,43 +546,69 @@ mod tests {
     }
 
     #[test]
-    fn default_probe_hit_skips_auto_open() {
+    fn default_probe_hit_is_attach() {
         let f = parse_mcp_flags(&args(&["mcp"])).unwrap();
-        let (auto_open, notice) = session_plan(&f, Some(true));
-        assert!(!auto_open);
-        assert_eq!(notice, Some(GUI_LISTENING));
+        let plan = session_plan(&f, Some(true));
+        assert_eq!(plan.kind, SessionKind::Attach);
+        assert_eq!(plan.notice, Some(ATTACHED));
     }
 
     #[test]
     fn default_probe_miss_is_quiet_standalone() {
         let f = parse_mcp_flags(&args(&["mcp"])).unwrap();
-        let (auto_open, notice) = session_plan(&f, Some(false));
-        assert!(auto_open);
-        assert!(notice.is_none());
+        let plan = session_plan(&f, Some(false));
+        assert_eq!(plan.kind, SessionKind::Standalone);
+        assert!(plan.notice.is_none());
     }
 
     #[test]
     fn attach_probe_miss_prints_fallback() {
         let f = parse_mcp_flags(&args(&["mcp", "--attach"])).unwrap();
-        let (auto_open, notice) = session_plan(&f, Some(false));
-        assert!(auto_open);
-        assert_eq!(notice, Some(ATTACH_FAIL));
+        let plan = session_plan(&f, Some(false));
+        assert_eq!(plan.kind, SessionKind::Standalone);
+        assert_eq!(plan.notice, Some(ATTACH_FAIL));
     }
 
     #[test]
-    fn attach_probe_hit_skips_auto_open() {
+    fn attach_probe_hit_is_attach() {
         let f = parse_mcp_flags(&args(&["mcp", "--attach"])).unwrap();
-        let (auto_open, notice) = session_plan(&f, Some(true));
-        assert!(!auto_open);
-        assert_eq!(notice, Some(GUI_LISTENING));
+        let plan = session_plan(&f, Some(true));
+        assert_eq!(plan.kind, SessionKind::Attach);
+        assert_eq!(plan.notice, Some(ATTACHED));
+    }
+
+    #[test]
+    fn attach_probe_hit_ignores_stdio_arm() {
+        let f = parse_mcp_flags(&args(&["mcp", "--attach", "--arm"])).unwrap();
+        let plan = session_plan(&f, Some(true));
+        assert_eq!(plan.kind, SessionKind::Attach);
+        assert!(f.arm);
     }
 
     #[test]
     fn standalone_skips_probe_and_auto_opens() {
         let f = parse_mcp_flags(&args(&["mcp", "--standalone"])).unwrap();
-        let (auto_open, notice) = session_plan(&f, None);
-        assert!(auto_open);
-        assert!(notice.is_none());
+        let plan = session_plan(&f, None);
+        assert_eq!(plan.kind, SessionKind::Standalone);
+        assert!(plan.notice.is_none());
+    }
+
+    #[test]
+    fn mcp_http_uri_default_loopback() {
+        let f = parse_mcp_flags(&args(&["mcp"])).unwrap();
+        assert_eq!(mcp_http_uri(&f), "http://127.0.0.1:7420/mcp");
+    }
+
+    #[test]
+    fn mcp_http_uri_from_url_flag() {
+        let f = parse_mcp_flags(&args(&["mcp", "--mcp-url", "http://127.0.0.1:7420/mcp"])).unwrap();
+        assert_eq!(mcp_http_uri(&f), "http://127.0.0.1:7420/mcp");
+    }
+
+    #[test]
+    fn mcp_http_uri_port_override() {
+        let f = parse_mcp_flags(&args(&["mcp", "--mcp-port", "9"])).unwrap();
+        assert_eq!(mcp_http_uri(&f), "http://127.0.0.1:9/mcp");
     }
 
     #[test]

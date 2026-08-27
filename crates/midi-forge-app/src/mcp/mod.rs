@@ -1,5 +1,6 @@
 //! Technician MCP façade: host trait + tool handlers. Stdio in `stdio`.
 
+pub mod attach;
 pub mod host;
 pub mod http;
 pub mod stdio;
