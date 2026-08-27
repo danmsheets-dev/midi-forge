@@ -158,6 +158,32 @@ pub fn midi2_per_note_management(group: u8, channel: u8, note: u8, flags: u8) ->
     UmpMessage::midi2_channel_voice(group, 0xF0 | (channel & 0x0F), note, flags, 0)
 }
 
+/// Convert MIDI 1.0 channel voice (UMP type 0x2) to MIDI 2.0 channel voice (type 0x4).
+/// Type 0x4 and non-CV messages pass through unchanged.
+pub fn upscale_to_midi2(packet: &UmpMessage) -> UmpMessage {
+    if packet.message_type() != 0x2 {
+        return *packet;
+    }
+    let status = packet.status_byte();
+    let group = packet.group();
+    let d1 = packet.data1();
+    let d2 = packet.data2();
+    let ch = status & 0x0F;
+    match status & 0xF0 {
+        0x80 => midi2_note_off_attr(group, ch, d1, velocity7_to_16(d2), 0, 0),
+        0x90 => midi2_note_on_attr(group, ch, d1, velocity7_to_16(d2), 0, 0),
+        0xA0 => UmpMessage::midi2_channel_voice(group, status, d1, 0, value7_to_32(d2)),
+        0xB0 => midi2_cc(group, ch, d1, value7_to_32(d2)),
+        0xC0 => UmpMessage::midi2_channel_voice(group, status, 0, 0, u32::from(d1) << 24),
+        0xD0 => UmpMessage::midi2_channel_voice(group, status, 0, 0, value7_to_32(d1)),
+        0xE0 => {
+            let v14 = u16::from(d1) | (u16::from(d2) << 7);
+            midi2_pitch_bend(group, ch, u32::from(v14) << 18)
+        }
+        _ => *packet,
+    }
+}
+
 /// If `packet` is MIDI 2.0 channel voice, return equivalent MIDI 1.0 UMP(s).
 /// Program Change with Bank Valid emits CC0, CC32, then PC. Other types pass through.
 pub fn downscale_to_midi1(packet: &UmpMessage) -> Vec<UmpMessage> {
@@ -460,5 +486,91 @@ mod tests {
             crate::decode(&ac).summary(),
             "Ch2 M2 AC rel bank 2 idx 3 16"
         );
+    }
+
+    #[test]
+    fn upscale_note_on_full_velocity() {
+        let m1 = UmpMessage::midi1_channel_voice(0, 0x90, 60, 127);
+        let m2 = upscale_to_midi2(&m1);
+        assert_eq!(m2.message_type(), 0x4);
+        assert_eq!(m2.status_byte(), 0x90);
+        assert_eq!(m2.data1(), 60);
+        assert_eq!(m2.words()[1] >> 16, 65535);
+    }
+
+    #[test]
+    fn upscale_cc_mid() {
+        let m1 = UmpMessage::midi1_channel_voice(0, 0xB0, 7, 64);
+        let m2 = upscale_to_midi2(&m1);
+        assert_eq!(m2.message_type(), 0x4);
+        assert_eq!(m2.data1(), 7);
+        assert_eq!(m2.words()[1], value7_to_32(64));
+    }
+
+    #[test]
+    fn upscale_passthrough_midi2_and_clock() {
+        let m2 = midi2_note_on(0, 1, 60, 0x8000);
+        assert_eq!(upscale_to_midi2(&m2), m2);
+        let clock = UmpMessage::midi1_system(0, 0xF8, 0, 0);
+        assert_eq!(upscale_to_midi2(&clock), clock);
+    }
+
+    #[test]
+    fn upscale_note_off_zero_velocity() {
+        let m1 = UmpMessage::midi1_channel_voice(0, 0x80, 60, 0);
+        let m2 = upscale_to_midi2(&m1);
+        assert_eq!(m2.message_type(), 0x4);
+        assert_eq!(m2.status_byte(), 0x80);
+        assert_eq!(m2.data1(), 60);
+        assert_eq!(m2.words()[1] >> 16, 0);
+    }
+
+    #[test]
+    fn upscale_note_on_zero_velocity_stays_note_on() {
+        let m1 = UmpMessage::midi1_channel_voice(0, 0x90, 60, 0);
+        let m2 = upscale_to_midi2(&m1);
+        assert_eq!(m2.message_type(), 0x4);
+        assert_eq!(m2.status_byte(), 0x90);
+        assert_eq!(m2.data1(), 60);
+        assert_eq!(m2.words()[1] >> 16, 0);
+    }
+
+    #[test]
+    fn upscale_poly_pressure() {
+        let m1 = UmpMessage::midi1_channel_voice(0, 0xA0, 60, 64);
+        let m2 = upscale_to_midi2(&m1);
+        assert_eq!(m2.message_type(), 0x4);
+        assert_eq!(m2.status_byte(), 0xA0);
+        assert_eq!(m2.data1(), 60);
+        assert_eq!(m2.words()[1], value7_to_32(64));
+    }
+
+    #[test]
+    fn upscale_program_change() {
+        let m1 = UmpMessage::midi1_channel_voice(0, 0xC2, 12, 0);
+        let m2 = upscale_to_midi2(&m1);
+        assert_eq!(m2.message_type(), 0x4);
+        assert_eq!(m2.status_byte(), 0xC2);
+        assert_eq!(m2.data1(), 0);
+        assert_eq!(m2.words()[1] >> 24, 12);
+        assert_eq!(m2.words()[1] & 0x00FF_FFFF, 0);
+    }
+
+    #[test]
+    fn upscale_channel_pressure() {
+        let m1 = UmpMessage::midi1_channel_voice(0, 0xD0, 64, 0);
+        let m2 = upscale_to_midi2(&m1);
+        assert_eq!(m2.message_type(), 0x4);
+        assert_eq!(m2.status_byte(), 0xD0);
+        assert_eq!(m2.words()[1], value7_to_32(64));
+    }
+
+    #[test]
+    fn upscale_pitch_bend_center() {
+        let m1 = UmpMessage::midi1_channel_voice(0, 0xE0, 0, 64);
+        let m2 = upscale_to_midi2(&m1);
+        assert_eq!(m2.message_type(), 0x4);
+        assert_eq!(m2.status_byte(), 0xE0);
+        assert_eq!(m2.words()[1], 0x8000_0000);
     }
 }
