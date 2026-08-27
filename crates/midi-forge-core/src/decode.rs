@@ -194,6 +194,37 @@ pub enum Decoded {
     DeltaClockstamp {
         ticks: u32,
     },
+    /// UMP Flex Data Set Tempo. `ten_ns_per_quarter` is the raw 32-bit field
+    /// (10-nanosecond units per quarter note, M2-104-UM §7.5.3).
+    FlexTempo {
+        group: u8,
+        ten_ns_per_quarter: u32,
+    },
+    FlexTimeSig {
+        group: u8,
+        numerator: u8,
+        denominator: u8,
+        number_of_32nd_notes: u8,
+    },
+    FlexMetronome {
+        group: u8,
+        clocks_per_primary: u8,
+        bar_accent1: u8,
+        bar_accent2: u8,
+        bar_accent3: u8,
+        subdivision_clicks1: u8,
+        subdivision_clicks2: u8,
+    },
+    FlexKeySig {
+        group: u8,
+        sharps_flats: i8,
+        tonic: u8,
+    },
+    FlexText {
+        group: u8,
+        kind: crate::flex::FlexTextKind,
+        text: String,
+    },
     Other {
         message_type: u8,
         group: u8,
@@ -203,7 +234,7 @@ pub enum Decoded {
 
 impl Decoded {
     pub fn summary(&self) -> String {
-        match *self {
+        match self {
             Self::NoteOn {
                 channel,
                 note,
@@ -224,7 +255,7 @@ impl Decoded {
             } => format!(
                 "Ch{} {} {value}",
                 channel + 1,
-                crate::cc::cc_label(controller)
+                crate::cc::cc_label(*controller)
             ),
             Self::PolyPressure {
                 channel,
@@ -263,11 +294,11 @@ impl Decoded {
                 ..
             } => midi2_note_summary(
                 "NoteOn",
-                channel,
-                note,
-                velocity,
-                attribute_type,
-                attribute_data,
+                *channel,
+                *note,
+                *velocity,
+                *attribute_type,
+                *attribute_data,
             ),
             Self::Midi2NoteOff {
                 channel,
@@ -278,11 +309,11 @@ impl Decoded {
                 ..
             } => midi2_note_summary(
                 "NoteOff",
-                channel,
-                note,
-                velocity,
-                attribute_type,
-                attribute_data,
+                *channel,
+                *note,
+                *velocity,
+                *attribute_type,
+                *attribute_data,
             ),
             Self::Midi2ControlChange {
                 channel,
@@ -292,7 +323,7 @@ impl Decoded {
             } => format!(
                 "Ch{} M2 {} {value}",
                 channel + 1,
-                crate::cc::cc_label(controller)
+                crate::cc::cc_label(*controller)
             ),
             Self::Midi2PolyPressure {
                 channel,
@@ -308,7 +339,7 @@ impl Decoded {
                 bank_lsb,
                 ..
             } => {
-                if bank_valid {
+                if *bank_valid {
                     format!(
                         "Ch{} M2 Program {program} bank {bank_msb}/{bank_lsb}",
                         channel + 1
@@ -391,6 +422,27 @@ impl Decoded {
             Self::JrTimestamp { ticks } => format!("JR Timestamp {ticks}"),
             Self::Dctpq { ticks_per_qn } => format!("DCTPQ {ticks_per_qn}"),
             Self::DeltaClockstamp { ticks } => format!("Delta Clockstamp {ticks}"),
+            Self::FlexTempo {
+                ten_ns_per_quarter, ..
+            } => match crate::flex::flex_tempo_bpm(*ten_ns_per_quarter) {
+                Some(bpm) => format!("Flex tempo {bpm:.2}"),
+                None => format!("Flex tempo {ten_ns_per_quarter} × 10ns/qn"),
+            },
+            Self::FlexTimeSig {
+                numerator,
+                denominator,
+                number_of_32nd_notes,
+                ..
+            } => format!("Flex time sig {numerator}/{denominator} 32nds {number_of_32nd_notes}"),
+            Self::FlexMetronome {
+                clocks_per_primary, ..
+            } => format!("Flex metronome {clocks_per_primary} clocks"),
+            Self::FlexKeySig {
+                sharps_flats,
+                tonic,
+                ..
+            } => format!("Flex key sig sf {sharps_flats} tonic {tonic}"),
+            Self::FlexText { kind, text, .. } => format!("Flex {kind:?} {text}"),
             Self::Other {
                 message_type,
                 status,
@@ -438,6 +490,11 @@ impl Decoded {
             Self::JrTimestamp { .. } => "jr_timestamp",
             Self::Dctpq { .. } => "dctpq",
             Self::DeltaClockstamp { .. } => "delta_clockstamp",
+            Self::FlexTempo { .. } => "flex_tempo",
+            Self::FlexTimeSig { .. } => "flex_time_sig",
+            Self::FlexMetronome { .. } => "flex_metronome",
+            Self::FlexKeySig { .. } => "flex_key_sig",
+            Self::FlexText { .. } => "flex_text",
             Self::Other { .. } => "other",
         }
     }
@@ -467,6 +524,7 @@ pub fn decode(msg: &UmpMessage) -> Decoded {
         0x3 => decode_sysex7(group, msg),
         0x4 => decode_midi2_channel(msg),
         0x5 => decode_data64(group, msg),
+        0xD => crate::flex::decode_flex(msg),
         mt => Decoded::Other {
             message_type: mt,
             group,
@@ -1016,5 +1074,146 @@ mod tests {
         }
         assert_eq!(decode(&m).kind_key(), "mixdata");
         assert!(decode(&m).summary().contains("MixData"));
+    }
+
+    #[test]
+    fn flex_tempo_120_bpm_golden() {
+        // M2-104-UM §7.5.3: 10 ns units/qn. 120 BPM = 50_000_000.
+        // Word0: MT=0xD group=0 form=0 addr=Group(1) ch=0 bank=0 status=0.
+        let m = UmpMessage::try_from_words(&[0xD010_0000, 0x02FA_F080, 0, 0]).unwrap();
+        match decode(&m) {
+            Decoded::FlexTempo {
+                group,
+                ten_ns_per_quarter,
+            } => {
+                assert_eq!(group, 0);
+                assert_eq!(ten_ns_per_quarter, 50_000_000);
+                assert_eq!(ten_ns_per_quarter / 100, 500_000);
+                let bpm = crate::flex::flex_tempo_bpm(ten_ns_per_quarter).unwrap();
+                assert!((bpm - 120.0).abs() < 1e-9);
+            }
+            other => panic!("expected FlexTempo, got {other:?}"),
+        }
+        assert_eq!(decode(&m).kind_key(), "flex_tempo");
+        assert_eq!(decode(&m).summary(), "Flex tempo 120.00");
+    }
+
+    #[test]
+    fn flex_set_tempo_constructs_golden_120() {
+        let m = crate::flex_set_tempo(0, 500_000);
+        assert_eq!(m.message_type(), 0xD);
+        assert_eq!(m.len(), 4);
+        assert_eq!(m.words(), &[0xD010_0000, 0x02FA_F080, 0, 0]);
+        match decode(&m) {
+            Decoded::FlexTempo {
+                ten_ns_per_quarter, ..
+            } => assert_eq!(ten_ns_per_quarter, 50_000_000),
+            other => panic!("expected FlexTempo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn flex_time_sig_4_4_golden() {
+        // M2-104-UM §7.5.4 / Table 32: nn, dd (neg. power of 2), number of 1/32nds.
+        let m = UmpMessage::try_from_words(&[0xD010_0001, 0x0402_0800, 0, 0]).unwrap();
+        match decode(&m) {
+            Decoded::FlexTimeSig {
+                group,
+                numerator,
+                denominator,
+                number_of_32nd_notes,
+            } => {
+                assert_eq!(group, 0);
+                assert_eq!(numerator, 4);
+                assert_eq!(denominator, 2);
+                assert_eq!(number_of_32nd_notes, 8);
+            }
+            other => panic!("expected FlexTimeSig, got {other:?}"),
+        }
+        assert_eq!(decode(&m).kind_key(), "flex_time_sig");
+        let built = crate::flex_set_time_sig(0, 4, 2, 8);
+        assert_eq!(built.words(), m.words());
+    }
+
+    #[test]
+    fn flex_metronome_golden() {
+        // midi2 crate fixture: group 1, bank 0 status 2.
+        let m = UmpMessage::try_from_words(&[0xD110_0002, 0x9B4A_FE56, 0xB81B_0000, 0]).unwrap();
+        match decode(&m) {
+            Decoded::FlexMetronome {
+                group,
+                clocks_per_primary,
+                bar_accent1,
+                bar_accent2,
+                bar_accent3,
+                subdivision_clicks1,
+                subdivision_clicks2,
+            } => {
+                assert_eq!(group, 1);
+                assert_eq!(clocks_per_primary, 0x9B);
+                assert_eq!(bar_accent1, 0x4A);
+                assert_eq!(bar_accent2, 0xFE);
+                assert_eq!(bar_accent3, 0x56);
+                assert_eq!(subdivision_clicks1, 0xB8);
+                assert_eq!(subdivision_clicks2, 0x1B);
+            }
+            other => panic!("expected FlexMetronome, got {other:?}"),
+        }
+        assert_eq!(decode(&m).kind_key(), "flex_metronome");
+        let built = crate::flex_set_metronome(1, 0x9B, 0x4A, 0xFE, 0x56, 0xB8, 0x1B);
+        assert_eq!(built.words(), m.words());
+    }
+
+    #[test]
+    fn flex_key_sig_golden() {
+        // midi2 crate: group 4, 5 sharps, tonic D (0x4). sf nibble is two's complement.
+        let m = UmpMessage::try_from_words(&[0xD410_0005, 0x5400_0000, 0, 0]).unwrap();
+        match decode(&m) {
+            Decoded::FlexKeySig {
+                group,
+                sharps_flats,
+                tonic,
+            } => {
+                assert_eq!(group, 4);
+                assert_eq!(sharps_flats, 5);
+                assert_eq!(tonic, 0x4);
+            }
+            other => panic!("expected FlexKeySig, got {other:?}"),
+        }
+        assert_eq!(decode(&m).kind_key(), "flex_key_sig");
+        let built = crate::flex_set_key_sig(4, 5, 0x4);
+        assert_eq!(built.words(), m.words());
+    }
+
+    #[test]
+    fn flex_lyric_complete_and_chunked() {
+        let complete = crate::flex_lyric(0, "Hello");
+        assert_eq!(complete.len(), 1);
+        assert_eq!(
+            complete[0].words(),
+            &[0xD010_0201, 0x4865_6C6C, 0x6F00_0000, 0]
+        );
+        match decode(&complete[0]) {
+            Decoded::FlexText { group, kind, text } => {
+                assert_eq!(group, 0);
+                assert_eq!(kind, crate::flex::FlexTextKind::Lyric);
+                assert_eq!(text, "Hello");
+            }
+            other => panic!("expected FlexText, got {other:?}"),
+        }
+        assert_eq!(decode(&complete[0]).kind_key(), "flex_text");
+
+        let chunks = crate::flex_lyric(0, "Hello, World!!");
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(
+            chunks[0].words(),
+            &[0xD050_0201, 0x4865_6C6C, 0x6F2C_2057, 0x6F72_6C64]
+        );
+        assert_eq!(chunks[1].words(), &[0xD0D0_0201, 0x2121_0000, 0, 0]);
+        let mut asm = crate::FlexTextAssembler::new();
+        assert!(asm.push(&chunks[0]).unwrap().is_none());
+        let done = asm.push(&chunks[1]).unwrap().expect("assembled lyric");
+        assert_eq!(done.kind, crate::flex::FlexTextKind::Lyric);
+        assert_eq!(done.text, "Hello, World!!");
     }
 }

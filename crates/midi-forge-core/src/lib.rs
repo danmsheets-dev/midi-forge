@@ -10,6 +10,7 @@ mod devices;
 mod error;
 mod event;
 mod filter;
+mod flex;
 mod hang;
 mod live;
 mod log;
@@ -40,6 +41,10 @@ pub use devices::{DeviceProfile, apply_device, device_library, pack_for_device};
 pub use error::CoreError;
 pub use event::{MidiEvent, PortId, Timestamp};
 pub use filter::{Filter, MessageKind, message_kind};
+pub use flex::{
+    FlexText, FlexTextAssembler, FlexTextKind, flex_lyric, flex_set_key_sig, flex_set_metronome,
+    flex_set_tempo, flex_set_time_sig, flex_tempo_bpm, flex_text,
+};
 pub use hang::{HangNote, HangTracker};
 pub use live::{LiveChannel, LiveView};
 pub use log::MonitorLog;

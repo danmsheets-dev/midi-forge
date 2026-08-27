@@ -20,6 +20,7 @@ pub enum MessageKind {
     SystemCommon,
     PerNote,
     Utility,
+    Flex,
     Other,
 }
 
@@ -49,6 +50,7 @@ pub fn message_kind(msg: &UmpMessage) -> MessageKind {
         0x0 => MessageKind::Utility,
         0x3 => MessageKind::Sysex,
         0x5 => MessageKind::Sysex8,
+        0xD => MessageKind::Flex,
         0x1 => match msg.status_byte() {
             0xF8 => MessageKind::Clock,
             0xFA..=0xFC => MessageKind::Transport,
@@ -87,6 +89,9 @@ pub struct Filter {
     /// UMP Utility (type 0x0): NOOP, JR clock/timestamp, DCTPQ, delta clockstamp.
     #[serde(default = "default_true")]
     pub utility: bool,
+    /// UMP Flex Data (type 0xD): tempo, time signature, text.
+    #[serde(default = "default_true")]
+    pub flex: bool,
     /// Bit `i` enables MIDI channel `i` (0–15).
     pub channels: u16,
     /// If set, rewrite channel-voice packets to this channel after the mask.
@@ -112,6 +117,7 @@ impl Default for Filter {
             other: true,
             per_note: true,
             utility: true,
+            flex: true,
             channels: 0xFFFF,
             force_channel: None,
         }
@@ -158,6 +164,7 @@ impl Filter {
             MessageKind::SystemCommon => self.system_common,
             MessageKind::PerNote => self.per_note,
             MessageKind::Utility => self.utility,
+            MessageKind::Flex => self.flex,
             MessageKind::Other => self.other,
         }
     }
@@ -306,6 +313,24 @@ mod tests {
         let f: Filter = serde_json::from_str(json).unwrap();
         assert!(f.utility);
         assert!(f.sysex8);
+        assert!(f.flex);
+    }
+
+    #[test]
+    fn type_d_flex_passes_when_other_is_dropped() {
+        let m = UmpMessage::try_from_words(&[0xD010_0000, 0x02FA_F080, 0, 0]).unwrap();
+        assert_eq!(message_kind(&m), MessageKind::Flex);
+        let drop_other = Filter {
+            other: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_other.apply(&m), Some(m));
+        let drop_flex = Filter {
+            flex: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_flex.apply(&m), None);
+        assert!(Filter::default().apply(&m).is_some());
     }
 
     #[test]
