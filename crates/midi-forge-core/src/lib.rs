@@ -54,9 +54,10 @@ pub use midi1::{
 };
 pub use midi2::{
     downscale_to_midi1, midi2_assignable_controller, midi2_assignable_per_note, midi2_cc,
-    midi2_note_off, midi2_note_on, midi2_per_note_management, midi2_per_note_pitch_bend,
-    midi2_pitch_bend, midi2_registered_controller, midi2_registered_per_note, value7_to_32,
-    value32_to_7, velocity7_to_16, velocity16_to_7,
+    midi2_note_off, midi2_note_off_attr, midi2_note_on, midi2_note_on_attr,
+    midi2_per_note_management, midi2_per_note_pitch_bend, midi2_pitch_bend,
+    midi2_registered_controller, midi2_registered_per_note, value7_to_32, value32_to_7,
+    velocity7_to_16, velocity16_to_7,
 };
 pub use mpe::{
     MPE_CONFIG_RPN, MpeTracker, MpeVoice, MpeZone, MpeZoneKind, PITCH_BEND_RANGE_RPN,

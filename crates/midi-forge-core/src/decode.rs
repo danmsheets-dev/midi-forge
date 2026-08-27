@@ -74,12 +74,16 @@ pub enum Decoded {
         channel: u8,
         note: u8,
         velocity: u16,
+        attribute_type: u8,
+        attribute_data: u16,
     },
     Midi2NoteOff {
         group: u8,
         channel: u8,
         note: u8,
         velocity: u16,
+        attribute_type: u8,
+        attribute_data: u16,
     },
     Midi2ControlChange {
         group: u8,
@@ -209,14 +213,32 @@ impl Decoded {
                 channel,
                 note,
                 velocity,
+                attribute_type,
+                attribute_data,
                 ..
-            } => format!("Ch{} M2 NoteOn {note} vel16 {velocity}", channel + 1),
+            } => midi2_note_summary(
+                "NoteOn",
+                channel,
+                note,
+                velocity,
+                attribute_type,
+                attribute_data,
+            ),
             Self::Midi2NoteOff {
                 channel,
                 note,
                 velocity,
+                attribute_type,
+                attribute_data,
                 ..
-            } => format!("Ch{} M2 NoteOff {note} vel16 {velocity}", channel + 1),
+            } => midi2_note_summary(
+                "NoteOff",
+                channel,
+                note,
+                velocity,
+                attribute_type,
+                attribute_data,
+            ),
             Self::Midi2ControlChange {
                 channel,
                 controller,
@@ -342,6 +364,21 @@ impl Decoded {
     }
 }
 
+fn midi2_note_summary(
+    kind: &str,
+    channel: u8,
+    note: u8,
+    velocity: u16,
+    attribute_type: u8,
+    attribute_data: u16,
+) -> String {
+    let mut s = format!("Ch{} M2 {kind} {note} vel16 {velocity}", channel + 1);
+    if attribute_type != 0 {
+        s.push_str(&format!(" attr {attribute_type} {attribute_data:#06X}"));
+    }
+    s
+}
+
 pub fn decode(msg: &UmpMessage) -> Decoded {
     let group = msg.group();
     match msg.message_type() {
@@ -446,12 +483,16 @@ fn decode_midi2_channel(msg: &UmpMessage) -> Decoded {
             channel,
             note: d1,
             velocity: (w1 >> 16) as u16,
+            attribute_type: msg.data2(),
+            attribute_data: (w1 & 0xFFFF) as u16,
         },
         0x80 => Decoded::Midi2NoteOff {
             group,
             channel,
             note: d1,
             velocity: (w1 >> 16) as u16,
+            attribute_type: msg.data2(),
+            attribute_data: (w1 & 0xFFFF) as u16,
         },
         0xB0 => Decoded::Midi2ControlChange {
             group,
@@ -624,7 +665,9 @@ mod tests {
                 group: 1,
                 channel: 2,
                 note: 64,
-                velocity: 0x8000
+                velocity: 0x8000,
+                attribute_type: 0,
+                attribute_data: 0,
             }
         );
         assert_eq!(decode(&msg).summary(), "Ch3 M2 NoteOn 64 vel16 32768");

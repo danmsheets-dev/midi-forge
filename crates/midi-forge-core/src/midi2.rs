@@ -35,22 +35,46 @@ pub fn value7_to_32(value: u8) -> u32 {
 }
 
 pub fn midi2_note_on(group: u8, channel: u8, note: u8, velocity: u16) -> UmpMessage {
+    midi2_note_on_attr(group, channel, note, velocity, 0, 0)
+}
+
+/// MIDI 2 Note On. `attr_type`: 0 none, 1 manufacturer, 2 profile, 3 pitch 7.9.
+pub fn midi2_note_on_attr(
+    group: u8,
+    channel: u8,
+    note: u8,
+    velocity: u16,
+    attr_type: u8,
+    attr_data: u16,
+) -> UmpMessage {
     UmpMessage::midi2_channel_voice(
         group,
         0x90 | (channel & 0x0F),
         note,
-        0,
-        u32::from(velocity) << 16,
+        attr_type,
+        (u32::from(velocity) << 16) | u32::from(attr_data),
     )
 }
 
 pub fn midi2_note_off(group: u8, channel: u8, note: u8, velocity: u16) -> UmpMessage {
+    midi2_note_off_attr(group, channel, note, velocity, 0, 0)
+}
+
+/// MIDI 2 Note Off. Attribute fields match [`midi2_note_on_attr`].
+pub fn midi2_note_off_attr(
+    group: u8,
+    channel: u8,
+    note: u8,
+    velocity: u16,
+    attr_type: u8,
+    attr_data: u16,
+) -> UmpMessage {
     UmpMessage::midi2_channel_voice(
         group,
         0x80 | (channel & 0x0F),
         note,
-        0,
-        u32::from(velocity) << 16,
+        attr_type,
+        (u32::from(velocity) << 16) | u32::from(attr_data),
     )
 }
 
@@ -287,6 +311,77 @@ mod tests {
         assert_eq!(m2.status_byte(), 0x92);
         assert_eq!(m2.data1(), 64);
         assert_eq!(m2.words()[1] >> 16, 0x8000);
+        assert_eq!(m2.data2(), 0);
+        assert_eq!(m2.words()[1] & 0xFFFF, 0);
+    }
+
+    #[test]
+    fn note_on_attribute_roundtrip() {
+        let m = midi2_note_on_attr(0, 1, 60, 0x8000, 3, 0x1234);
+        assert_eq!(m.data2(), 3);
+        assert_eq!(m.words()[1] & 0xFFFF, 0x1234);
+        match crate::decode(&m) {
+            crate::Decoded::Midi2NoteOn {
+                attribute_type,
+                attribute_data,
+                velocity,
+                ..
+            } => {
+                assert_eq!(attribute_type, 3);
+                assert_eq!(attribute_data, 0x1234);
+                assert_eq!(velocity, 0x8000);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            crate::decode(&m).summary(),
+            "Ch2 M2 NoteOn 60 vel16 32768 attr 3 0x1234"
+        );
+    }
+
+    #[test]
+    fn note_off_attribute_roundtrip() {
+        let m = midi2_note_off_attr(0, 1, 60, 0x4000, 1, 0xABCD);
+        assert_eq!(m.message_type(), 0x4);
+        assert_eq!(m.status_byte(), 0x81);
+        assert_eq!(m.data1(), 60);
+        assert_eq!(m.data2(), 1);
+        assert_eq!(m.words()[1] >> 16, 0x4000);
+        assert_eq!(m.words()[1] & 0xFFFF, 0xABCD);
+        match crate::decode(&m) {
+            crate::Decoded::Midi2NoteOff {
+                attribute_type,
+                attribute_data,
+                velocity,
+                ..
+            } => {
+                assert_eq!(attribute_type, 1);
+                assert_eq!(attribute_data, 0xABCD);
+                assert_eq!(velocity, 0x4000);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            crate::decode(&m).summary(),
+            "Ch2 M2 NoteOff 60 vel16 16384 attr 1 0xABCD"
+        );
+    }
+
+    #[test]
+    fn note_attribute_ignored_on_downscale() {
+        let on = midi2_note_on_attr(0, 1, 60, 0xFFFF, 3, 0x1234);
+        let m1 = &downscale_to_midi1(&on)[0];
+        assert_eq!(m1.message_type(), 0x2);
+        assert_eq!(m1.status_byte(), 0x91);
+        assert_eq!(m1.data1(), 60);
+        assert_eq!(m1.data2(), 127);
+
+        let off = midi2_note_off_attr(0, 1, 60, 0x8000, 2, 0x00FF);
+        let m1 = &downscale_to_midi1(&off)[0];
+        assert_eq!(m1.message_type(), 0x2);
+        assert_eq!(m1.status_byte(), 0x81);
+        assert_eq!(m1.data1(), 60);
+        assert_eq!(m1.data2(), velocity16_to_7(0x8000));
     }
 
     #[test]
