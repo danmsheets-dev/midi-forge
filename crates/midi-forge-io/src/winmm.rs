@@ -8,11 +8,13 @@ use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
 use std::time::{Duration, Instant};
 
 use midi_forge_core::{
-    Midi1Parser, MidiEvent, PortId, Timestamp, UmpMessage, downscale_to_midi1,
-    packed_short_from_ump, ump_from_packed_short,
+    Midi1Parser, MidiEvent, PortId, Timestamp, UmpMessage, packed_short_from_ump,
+    ump_from_packed_short,
 };
 
-use crate::backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint};
+use crate::backend::{
+    Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint, packets_for_wire,
+};
 use crate::error::IoError;
 use crate::loopback::SoftwareLoopbacks;
 
@@ -374,7 +376,13 @@ impl MidiBackend for WinMmBackend {
             return Err(IoError::NotFound(id.0.clone()));
         };
         let handle = output.handle;
-        for packet in downscale_to_midi1(packet) {
+        let protocol = self
+            .endpoints
+            .iter()
+            .find(|e| e.id == *id)
+            .map(|e| e.protocol)
+            .unwrap_or(ProtocolHint::Midi1Bytes);
+        for packet in packets_for_wire(protocol, packet) {
             let packed = packed_short_from_ump(&packet).ok_or(IoError::UnsupportedPacket)?;
             let rc = unsafe { midiOutShortMsg(handle, packed) };
             if rc != MMSYSERR_NOERROR {

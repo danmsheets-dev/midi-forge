@@ -12,7 +12,9 @@ use coremidi::{
 
 use midi_forge_core::{Midi1Parser, MidiEvent, PortId, Timestamp, UmpMessage};
 
-use crate::backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint};
+use crate::backend::{
+    Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint, packets_for_wire,
+};
 use crate::error::IoError;
 
 const QUEUE_CAP: usize = 4096;
@@ -171,7 +173,13 @@ impl MidiBackend for CoreMidiBackend {
     }
 
     fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError> {
-        for packet in midi_forge_core::downscale_to_midi1(packet) {
+        let protocol = self
+            .endpoints
+            .iter()
+            .find(|e| e.id == *id)
+            .map(|e| e.protocol)
+            .unwrap_or(ProtocolHint::Ump);
+        for packet in packets_for_wire(protocol, packet) {
             self.send_one(id, &packet)?;
         }
         Ok(())
@@ -294,7 +302,10 @@ impl CoreMidiBackend {
                 id: EndpointId(format!("coremidi:src:{i}")),
                 name,
                 direction: Direction::Input,
-                protocol: ProtocolHint::Ump,
+                protocol: protocol_from_id(
+                    src.get_property::<i32>(&coremidi::Properties::protocol_id())
+                        .ok(),
+                ),
             });
         }
         for (i, dst) in Destinations.into_iter().enumerate() {
@@ -306,7 +317,10 @@ impl CoreMidiBackend {
                 id: EndpointId(format!("coremidi:dst:{i}")),
                 name,
                 direction: Direction::Output,
-                protocol: ProtocolHint::Ump,
+                protocol: protocol_from_id(
+                    dst.get_property::<i32>(&coremidi::Properties::protocol_id())
+                        .ok(),
+                ),
             });
         }
         for (idx, src) in &self.virtual_sources {
@@ -348,6 +362,16 @@ impl CoreMidiBackend {
 
 fn skip_owned(owned: &HashSet<u32>, unique: Option<u32>) -> bool {
     unique.is_some_and(|id| owned.contains(&id))
+}
+
+/// Hardware protocol from `kMIDIPropertyProtocolID`. Missing/unknown stays UMP
+/// (previous tagging). Virtual dests are created with `Protocol::Midi20` and
+/// tagged UMP without querying.
+fn protocol_from_id(protocol_id: Option<i32>) -> ProtocolHint {
+    match protocol_id {
+        Some(1) => ProtocolHint::Midi1Bytes, // kMIDIProtocol_1_0
+        _ => ProtocolHint::Ump,
+    }
 }
 
 fn push_event_list(

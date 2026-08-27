@@ -2,7 +2,9 @@ use std::collections::HashSet;
 
 use midi_forge_core::{MidiEvent, PortId, UmpMessage};
 
-use crate::backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint};
+use crate::backend::{
+    Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint, packets_for_wire,
+};
 use crate::error::IoError;
 use crate::loopback::SoftwareLoopbacks;
 
@@ -145,7 +147,15 @@ impl MidiBackend for NullBackend {
         if !self.open_outputs.contains(&id.0) {
             return Err(IoError::NotFound(id.0.clone()));
         }
-        self.sent.push((id.0.clone(), *packet));
+        let protocol = self
+            .endpoints
+            .iter()
+            .find(|e| e.id == *id)
+            .map(|e| e.protocol)
+            .unwrap_or(ProtocolHint::Ump);
+        for packet in packets_for_wire(protocol, packet) {
+            self.sent.push((id.0.clone(), packet));
+        }
         Ok(())
     }
 
@@ -279,5 +289,30 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].port, PortId(3));
         assert_eq!(out[0].packet, note);
+    }
+
+    #[test]
+    fn midi2_note_on_ump_dest_stays_type_4_after_send() {
+        let mut backend = NullBackend::empty();
+        let (inp, outp) = backend.create_loopback("Ump").unwrap();
+        backend.open_input(&inp, PortId(1)).unwrap();
+        backend.open_output(&outp, PortId(2)).unwrap();
+        let m2 = midi_forge_core::midi2_note_on(0, 1, 64, 0x8000);
+        backend.send(&outp, &m2).unwrap();
+        let mut got = Vec::new();
+        backend.poll(&mut got);
+        assert_eq!(got[0].packet, m2);
+        assert_eq!(got[0].packet.message_type(), 0x4);
+    }
+
+    #[test]
+    fn midi2_note_on_midi1_dest_is_type_2_after_send() {
+        let mut backend = NullBackend::with_fixture_ports();
+        let id = EndpointId("null:out:0".into());
+        backend.open_output(&id, PortId(2)).unwrap();
+        let m2 = midi_forge_core::midi2_note_on(0, 1, 64, 0x8000);
+        backend.send(&id, &m2).unwrap();
+        assert_eq!(backend.sent().len(), 1);
+        assert_eq!(backend.sent()[0].1.message_type(), 0x2);
     }
 }

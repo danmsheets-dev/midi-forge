@@ -18,6 +18,7 @@ mod coremidi_backend;
 
 pub use backend::{
     BackendCaps, Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint, default_backend,
+    packets_for_wire,
 };
 pub use error::IoError;
 pub use loopback::is_loopback_pair;

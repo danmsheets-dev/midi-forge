@@ -49,6 +49,15 @@ impl ProtocolHint {
     }
 }
 
+/// Packets to put on the wire for this endpoint. Downscale is per-endpoint,
+/// not backend-wide: UMP dests keep type `0x4`; MIDI 1 dests project to `0x2`.
+pub fn packets_for_wire(protocol: ProtocolHint, packet: &UmpMessage) -> Vec<UmpMessage> {
+    match protocol {
+        ProtocolHint::Ump => vec![*packet],
+        ProtocolHint::Midi1Bytes => midi_forge_core::downscale_to_midi1(packet),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Endpoint {
     pub id: EndpointId,
@@ -98,7 +107,7 @@ pub fn default_backend() -> Box<dyn MidiBackend> {
 
 #[cfg(test)]
 mod tests {
-    use super::ProtocolHint;
+    use super::{ProtocolHint, packets_for_wire};
 
     #[test]
     fn protocol_labels() {
@@ -111,5 +120,22 @@ mod tests {
         let c = super::BackendCaps::default();
         assert!(!c.native_ump);
         assert!(!c.scheduled_send);
+    }
+
+    #[test]
+    fn midi2_note_on_ump_dest_stays_type_4() {
+        let m2 = midi_forge_core::midi2_note_on(0, 1, 64, 0x8000);
+        let out = packets_for_wire(ProtocolHint::Ump, &m2);
+        assert_eq!(out, vec![m2]);
+        assert_eq!(out[0].message_type(), 0x4);
+    }
+
+    #[test]
+    fn midi2_note_on_midi1_dest_is_type_2() {
+        let m2 = midi_forge_core::midi2_note_on(0, 1, 64, 0x8000);
+        let out = packets_for_wire(ProtocolHint::Midi1Bytes, &m2);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].message_type(), 0x2);
+        assert_ne!(out[0], m2);
     }
 }
