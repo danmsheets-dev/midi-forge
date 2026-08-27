@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::sysex::SysexError;
 use crate::ump::UmpMessage;
 
@@ -62,11 +64,12 @@ pub fn sysex8_packets(group: u8, stream_id: u8, data: &[u8]) -> Vec<UmpMessage> 
 }
 
 /// Reassemble SysEx8 packets into a payload (`stream id` stripped, data concatenated).
+///
+/// Open dumps are keyed by `(group, stream id)` so concurrent streams do not
+/// clobber each other. Spec count is 1–14 (stream id plus 0–13 data bytes).
 #[derive(Default)]
 pub struct Sysex8Assembler {
-    buf: Vec<u8>,
-    open: bool,
-    stream_id: u8,
+    streams: HashMap<(u8, u8), Vec<u8>>,
 }
 
 impl Sysex8Assembler {
@@ -75,44 +78,49 @@ impl Sysex8Assembler {
     }
 
     pub fn reset(&mut self) {
-        self.buf.clear();
-        self.open = false;
-        self.stream_id = 0;
+        self.streams.clear();
     }
 
     /// Feed one UMP. `Ok(Some(payload))` when a message finishes; `Ok(None)`
-    /// while assembling or if the packet is not SysEx8. Truncated streams
-    /// error like a framed SysEx dump (`SysexError::Framing`) and reset.
+    /// while assembling or if the packet is not SysEx8. Unknown CONTINUE/END
+    /// and invalid count (`0` or `> 14`) error as `SysexError::Framing` for
+    /// that stream only.
     pub fn push(&mut self, packet: &UmpMessage) -> Result<Option<Vec<u8>>, SysexError> {
         let Some((status, count, stream_id, data)) = packet.sysex8_parts() else {
             return Ok(None);
         };
-        let n = usize::from(count.saturating_sub(1).min(SYSEX8_MAX_DATA as u8));
+        let key = (packet.group(), stream_id);
+        if count == 0 || count > 14 {
+            self.streams.remove(&key);
+            return Err(SysexError::Framing);
+        }
+        let n = usize::from(count - 1);
         let payload = &data[..n];
         match status {
             SYSEX8_COMPLETE => {
-                self.reset();
+                self.streams.remove(&key);
                 Ok(Some(payload.to_vec()))
             }
             SYSEX8_START => {
-                self.buf.clear();
-                self.buf.extend_from_slice(payload);
-                self.open = true;
-                self.stream_id = stream_id;
+                self.streams.insert(key, payload.to_vec());
                 Ok(None)
             }
-            SYSEX8_CONTINUE if self.open && self.stream_id == stream_id => {
-                self.buf.extend_from_slice(payload);
-                Ok(None)
-            }
-            SYSEX8_END if self.open && self.stream_id == stream_id => {
-                self.buf.extend_from_slice(payload);
-                let dump = std::mem::take(&mut self.buf);
-                self.reset();
-                Ok(Some(dump))
-            }
+            SYSEX8_CONTINUE => match self.streams.get_mut(&key) {
+                Some(buf) => {
+                    buf.extend_from_slice(payload);
+                    Ok(None)
+                }
+                None => Err(SysexError::Framing),
+            },
+            SYSEX8_END => match self.streams.remove(&key) {
+                Some(mut buf) => {
+                    buf.extend_from_slice(payload);
+                    Ok(Some(buf))
+                }
+                None => Err(SysexError::Framing),
+            },
             _ => {
-                self.reset();
+                self.streams.remove(&key);
                 Err(SysexError::Framing)
             }
         }
@@ -228,5 +236,78 @@ mod tests {
         assert_eq!(asm.push(&note), Ok(None));
         let mds = mixdata_packet(0, MIXDATA_HEADER, 1);
         assert_eq!(asm.push(&mds), Ok(None));
+    }
+
+    fn raw_sysex8(group: u8, status: u8, count: u8, stream_id: u8) -> UmpMessage {
+        let word0 = (0x5 << 28)
+            | (u32::from(group & 0x0F) << 24)
+            | (u32::from(status & 0x0F) << 20)
+            | (u32::from(count & 0x0F) << 16)
+            | (u32::from(stream_id) << 8);
+        UmpMessage::try_from_words(&[word0, 0, 0, 0]).expect("UMP type 0x5 is four words")
+    }
+
+    #[test]
+    fn continue_on_other_stream_does_not_discard_open_dump() {
+        let mut asm = Sysex8Assembler::new();
+        let start = sysex8_packet(0, SYSEX8_START, 1, &[1, 2, 3, 4, 5]);
+        assert_eq!(asm.push(&start), Ok(None));
+
+        let cont_other = sysex8_packet(0, SYSEX8_CONTINUE, 2, &[9]);
+        assert_eq!(asm.push(&cont_other), Err(SysexError::Framing));
+
+        let end = sysex8_packet(0, SYSEX8_END, 1, &[6, 7]);
+        assert_eq!(asm.push(&end), Ok(Some(vec![1, 2, 3, 4, 5, 6, 7])));
+    }
+
+    #[test]
+    fn complete_on_other_stream_does_not_reset_open() {
+        let mut asm = Sysex8Assembler::new();
+        let start = sysex8_packet(0, SYSEX8_START, 1, &[1, 2]);
+        assert_eq!(asm.push(&start), Ok(None));
+        let complete = sysex8_packet(0, SYSEX8_COMPLETE, 2, &[9]);
+        assert_eq!(asm.push(&complete), Ok(Some(vec![9])));
+        let end = sysex8_packet(0, SYSEX8_END, 1, &[3]);
+        assert_eq!(asm.push(&end), Ok(Some(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn same_stream_id_different_groups_are_independent() {
+        let mut asm = Sysex8Assembler::new();
+        let start_g0 = sysex8_packet(0, SYSEX8_START, 1, &[1, 2]);
+        let start_g1 = sysex8_packet(1, SYSEX8_START, 1, &[8, 9]);
+        assert_eq!(asm.push(&start_g0), Ok(None));
+        assert_eq!(asm.push(&start_g1), Ok(None));
+        let end_g0 = sysex8_packet(0, SYSEX8_END, 1, &[3]);
+        assert_eq!(asm.push(&end_g0), Ok(Some(vec![1, 2, 3])));
+        let end_g1 = sysex8_packet(1, SYSEX8_END, 1, &[10]);
+        assert_eq!(asm.push(&end_g1), Ok(Some(vec![8, 9, 10])));
+    }
+
+    #[test]
+    fn count_zero_is_framing_not_empty_dump() {
+        let mut asm = Sysex8Assembler::new();
+        let msg = raw_sysex8(0, SYSEX8_COMPLETE, 0, 1);
+        assert_eq!(msg.sysex8_parts().map(|p| p.1), Some(0));
+        assert_eq!(asm.push(&msg), Err(SysexError::Framing));
+    }
+
+    #[test]
+    fn count_zero_on_other_stream_leaves_open_dump() {
+        let mut asm = Sysex8Assembler::new();
+        let start = sysex8_packet(0, SYSEX8_START, 1, &[1, 2, 3]);
+        assert_eq!(asm.push(&start), Ok(None));
+        let bad = raw_sysex8(0, SYSEX8_COMPLETE, 0, 2);
+        assert_eq!(asm.push(&bad), Err(SysexError::Framing));
+        let end = sysex8_packet(0, SYSEX8_END, 1, &[4]);
+        assert_eq!(asm.push(&end), Ok(Some(vec![1, 2, 3, 4])));
+    }
+
+    #[test]
+    fn count_fifteen_is_framing() {
+        let mut asm = Sysex8Assembler::new();
+        let msg = raw_sysex8(0, SYSEX8_COMPLETE, 15, 1);
+        assert_eq!(msg.sysex8_parts().map(|p| p.1), Some(15));
+        assert_eq!(asm.push(&msg), Err(SysexError::Framing));
     }
 }
