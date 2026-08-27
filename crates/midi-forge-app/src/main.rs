@@ -5,6 +5,7 @@ mod cli;
 mod clock;
 mod inject;
 mod live;
+mod mcp;
 mod mpe;
 mod script;
 mod stream;
