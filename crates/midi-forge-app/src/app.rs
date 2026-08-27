@@ -76,6 +76,11 @@ pub(crate) struct EngineInner {
     pub(crate) mon_cc: bool,
     pub(crate) mon_clock: bool,
     pub(crate) mon_sysex: bool,
+    pub(crate) mon_sysex8: bool,
+    pub(crate) mon_utility: bool,
+    pub(crate) mon_flex: bool,
+    pub(crate) mon_stream: bool,
+    pub(crate) mon_jr_clock: bool,
     pub(crate) mon_other: bool,
     pub(crate) mon_channel: u8,
     activity: HashMap<String, Instant>,
@@ -197,6 +202,11 @@ impl EngineInner {
             mon_cc: true,
             mon_clock: true,
             mon_sysex: true,
+            mon_sysex8: true,
+            mon_utility: true,
+            mon_flex: true,
+            mon_stream: true,
+            mon_jr_clock: false,
             mon_other: true,
             mon_channel: 0,
             activity: HashMap::new(),
@@ -504,7 +514,10 @@ impl EngineInner {
             for event in &processed {
                 if self.mute_clock {
                     let kind = message_kind(&event.packet);
-                    if kind == MessageKind::Clock || kind == MessageKind::ActiveSensing {
+                    if kind == MessageKind::Clock
+                        || kind == MessageKind::ActiveSensing
+                        || is_jr_clock(&event.packet)
+                    {
                         continue;
                     }
                 }
@@ -988,7 +1001,9 @@ impl EngineInner {
                         .send_viewport_cmd(egui::ViewportCommand::WindowLevel(level));
                 }
                 ui.checkbox(&mut self.mute_clock, "Mute clock")
-                    .on_hover_text("Drop MIDI clock and active sensing on thru. Monitor still shows them.");
+                    .on_hover_text(
+                        "Drop MIDI clock, active sensing, and UMP JR Clock on thru. Monitor still shows them if their type filters are on.",
+                    );
                 ui.checkbox(&mut self.follow, "Follow");
                 ui.separator();
                 ui.label(format!("{} events", self.log.len()));
@@ -1012,7 +1027,7 @@ impl EngineInner {
                             "MidiSrv",
                         )
                         .on_hover_text(
-                            "Windows MIDI Services is running. WinMM sees MIDI 1 views of UMP devices. Native MidiSession I/O is a later phase.",
+                            "Windows MIDI Services is running. WinMM sees MIDI 1 views of UMP devices. COM initializer exists; live MidiSession send/receive still needs the SDK winmd projection (winget install Microsoft.WindowsMIDIServicesSDK).",
                         );
                     }
                     let caps = self.backend.caps();
@@ -1190,6 +1205,7 @@ fn header_row(ui: &mut egui::Ui) {
         ui.monospace(egui::RichText::new(format!("{:<10}", "Time")).strong());
         ui.monospace(egui::RichText::new(format!("{:<20}", "Port")).strong());
         ui.monospace(egui::RichText::new(format!("{:<14}", "Hex")).strong());
+        ui.monospace(egui::RichText::new(format!("{:<36}", "UMP")).strong());
         ui.monospace(egui::RichText::new("Decoded").strong());
     });
 }
@@ -1201,13 +1217,30 @@ fn event_row(ui: &mut egui::Ui, event: &MidiEvent, names: &HashMap<PortId, Strin
         .cloned()
         .unwrap_or_else(|| format!("port {}", event.port.0));
     let hex = format_wire_hex(&event.packet);
+    let ump = format_ump_words(&event.packet);
     let decoded = decode(&event.packet).summary();
     ui.horizontal(|ui| {
         ui.monospace(format!("{time:<10}"));
         ui.monospace(format!("{:<20}", truncate(&port, 20)));
         ui.monospace(format!("{hex:<14}"));
+        ui.monospace(format!("{ump:<36}"));
         ui.monospace(decoded);
     });
+}
+
+/// Underscore-grouped hex of `packet.words()`, e.g. `4090_3C00 8000_0000`.
+fn format_ump_words(packet: &UmpMessage) -> String {
+    packet
+        .words()
+        .iter()
+        .map(|w| format!("{:04X}_{:04X}", w >> 16, w & 0xFFFF))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// UMP Utility JR Clock (type 0x0, status 1). Floods like MIDI 1 F8.
+fn is_jr_clock(packet: &UmpMessage) -> bool {
+    packet.message_type() == 0 && ((packet.words()[0] >> 20) & 0xF) == 1
 }
 
 pub(crate) fn truncate(s: &str, max: usize) -> String {
@@ -1315,7 +1348,18 @@ fn monitor_toolbar(ui: &mut egui::Ui, app: &mut EngineInner) {
         ui.checkbox(&mut app.mon_notes, "Notes");
         ui.checkbox(&mut app.mon_cc, "CC");
         ui.checkbox(&mut app.mon_clock, "Clock");
+        ui.checkbox(&mut app.mon_jr_clock, "JR").on_hover_text(
+            "UMP JR Clock (type 0x0 status 1). Off by default — it floods like MIDI 1 clock.",
+        );
         ui.checkbox(&mut app.mon_sysex, "SysEx");
+        ui.checkbox(&mut app.mon_sysex8, "SysEx8")
+            .on_hover_text("UMP type 0x5 SysEx8 and MixData");
+        ui.checkbox(&mut app.mon_utility, "Utility")
+            .on_hover_text("UMP type 0x0 except JR Clock (NOOP, JR timestamp, DCTPQ)");
+        ui.checkbox(&mut app.mon_flex, "Flex")
+            .on_hover_text("UMP type 0xD Flex Data");
+        ui.checkbox(&mut app.mon_stream, "Stream")
+            .on_hover_text("UMP type 0xF Stream (discovery, function blocks)");
         ui.checkbox(&mut app.mon_other, "Other");
         ui.label("Ch");
         ui.add(egui::DragValue::new(&mut app.mon_channel).range(0..=16))
@@ -1388,15 +1432,7 @@ fn monitor_toolbar(ui: &mut egui::Ui, app: &mut EngineInner) {
 }
 
 fn event_passes_monitor(app: &EngineInner, event: &MidiEvent) -> bool {
-    let kind = message_kind(&event.packet);
-    let type_ok = match kind {
-        MessageKind::Note | MessageKind::PerNote => app.mon_notes,
-        MessageKind::ControlChange => app.mon_cc,
-        MessageKind::Clock | MessageKind::ActiveSensing => app.mon_clock,
-        MessageKind::Sysex => app.mon_sysex,
-        _ => app.mon_other,
-    };
-    if !type_ok {
+    if !monitor_type_ok(app, &event.packet) {
         return false;
     }
     if app.mon_channel > 0 {
@@ -1411,11 +1447,30 @@ fn event_passes_monitor(app: &EngineInner, event: &MidiEvent) -> bool {
     }
     let q = app.mon_search.to_lowercase();
     let hex = format_wire_hex(&event.packet);
+    let ump = format_ump_words(&event.packet);
     let decoded = decode(&event.packet).summary();
     let port = app.port_names.get(&event.port).cloned().unwrap_or_default();
     hex.to_lowercase().contains(&q)
+        || ump.to_lowercase().contains(&q)
         || decoded.to_lowercase().contains(&q)
         || port.to_lowercase().contains(&q)
+}
+
+fn monitor_type_ok(app: &EngineInner, packet: &UmpMessage) -> bool {
+    if is_jr_clock(packet) {
+        return app.mon_jr_clock;
+    }
+    match message_kind(packet) {
+        MessageKind::Note | MessageKind::PerNote => app.mon_notes,
+        MessageKind::ControlChange => app.mon_cc,
+        MessageKind::Clock | MessageKind::ActiveSensing => app.mon_clock,
+        MessageKind::Sysex => app.mon_sysex,
+        MessageKind::Sysex8 => app.mon_sysex8,
+        MessageKind::Utility => app.mon_utility,
+        MessageKind::Flex => app.mon_flex,
+        MessageKind::Stream => app.mon_stream,
+        _ => app.mon_other,
+    }
 }
 
 fn visible_log_indices(app: &EngineInner) -> Vec<usize> {
@@ -1431,8 +1486,9 @@ fn format_event_line(event: &MidiEvent, names: &HashMap<PortId, String>) -> Stri
         .cloned()
         .unwrap_or_else(|| format!("port {}", event.port.0));
     format!(
-        "{time:.3}\t{port}\t{}\t{}",
+        "{time:.3}\t{port}\t{}\t{}\t{}",
         format_wire_hex(&event.packet),
+        format_ump_words(&event.packet),
         decode(&event.packet).summary()
     )
 }
@@ -1457,5 +1513,25 @@ fn export_visible_log(app: &mut EngineInner) {
     match std::fs::write(&path, format_visible_log(app)) {
         Ok(()) => app.status = format!("Exported {}", path.display()),
         Err(err) => app.status = format!("Export failed: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use midi_forge_core::{midi2_note_on, ump_jr_clock, ump_jr_timestamp, ump_noop};
+
+    #[test]
+    fn ump_words_midi2_note_on() {
+        let m = midi2_note_on(0, 0, 60, 0x8000);
+        assert_eq!(format_ump_words(&m), "4090_3C00 8000_0000");
+    }
+
+    #[test]
+    fn jr_clock_is_status_1_only() {
+        assert!(is_jr_clock(&ump_jr_clock(0x00AB)));
+        assert!(!is_jr_clock(&ump_jr_timestamp(0x00AB)));
+        assert!(!is_jr_clock(&ump_noop()));
+        assert!(!is_jr_clock(&UmpMessage::midi1_system(0, 0xF8, 0, 0)));
     }
 }
