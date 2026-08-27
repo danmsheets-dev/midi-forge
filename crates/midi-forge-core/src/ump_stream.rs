@@ -392,6 +392,9 @@ struct ParsedFb {
 fn parse_fb_info(msg: &UmpMessage) -> ParsedFb {
     let w0 = msg.words()[0];
     let w1 = msg.words().get(1).copied().unwrap_or(0);
+    // Last byte of word0, M2-104-UM §7.1.8 / linux ump_msg.h:
+    //   bits 7–6 reserved, 5–4 UI hint, 3–2 MIDI 1/2, 1–0 direction.
+    // MIDI 1/2: 0 = not MIDI 1.0 (MIDI 2), 1/2 = MIDI 1 (2 = 31.25 kbps).
     let midi10 = ((w0 >> 2) & 0x3) as u8;
     ParsedFb {
         id: ((w0 >> 8) & 0x7F) as u8,
@@ -468,6 +471,8 @@ mod tests {
     /// Endpoint Info: UMP 1.1, MIDI 2 capability, JR rx (not tx).
     const EP_INFO_M2_JRRX: [u32; 4] = [0xF001_0101, 0x0000_0202, 0, 0];
     /// midi2 crate FunctionBlockInfo builder fixture.
+    /// Last byte 0x36 = UI hint both (bits 5–4 = 11), MIDI 1 no-limit (bits 3–2 = 01),
+    /// direction output (bits 1–0 = 10).
     const FB_INFO: [u32; 4] = [0xF011_9136, 0x0D08_0120, 0, 0];
     /// Function Block Discovery: all blocks, filter info+name.
     const FB_DISCOVERY: [u32; 4] = [0xF010_FF03, 0, 0, 0];
@@ -588,6 +593,35 @@ mod tests {
         assert_eq!(b.n_groups, 8);
         assert!(b.midi1);
         assert!(!b.midi2);
+        assert_eq!(b.direction, FB_DIR_OUTPUT);
+    }
+
+    #[test]
+    fn function_block_info_midi2_not_flipped_by_ui_hint() {
+        // MIDI 2 (bits 3–2 = 00) + UI hint sender (bits 5–4 = 10) + output (10).
+        // Reading MIDI 1/2 from bits 5–4 would treat the sender hint as MIDI 1.
+        const UI_HINT_SENDER: u32 = 0b10 << 4;
+        const MIDI10_MIDI2: u32 = 0b00 << 2;
+        let last = UI_HINT_SENDER | MIDI10_MIDI2 | u32::from(FB_DIR_OUTPUT);
+        let m = pkt([0xF011_0000 | last, 0x0D08_0120, 0, 0]);
+        match decode(&m) {
+            Decoded::StreamFunctionBlockInfo {
+                midi1,
+                midi2,
+                direction,
+                ..
+            } => {
+                assert!(midi2);
+                assert!(!midi1);
+                assert_eq!(direction, FB_DIR_OUTPUT);
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut t = StreamTracker::new();
+        t.feed(&m);
+        let b = &t.snapshot().blocks[0];
+        assert!(b.midi2);
+        assert!(!b.midi1);
         assert_eq!(b.direction, FB_DIR_OUTPUT);
     }
 
