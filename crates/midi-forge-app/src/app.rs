@@ -15,9 +15,13 @@ use midi_forge_io::{
     explain_in_use, is_loopback_pair, probe_wms,
 };
 
+#[cfg(test)]
+use midi_forge_io::NullBackend;
+
 use crate::clock;
 use crate::inject;
 use crate::live;
+use crate::mcp;
 use crate::mpe;
 use crate::script::{self, RightTab};
 use crate::stream;
@@ -27,6 +31,7 @@ use crate::thru;
 pub struct MidiForgeApp {
     inner: Arc<Mutex<EngineInner>>,
     stop: Arc<AtomicBool>,
+    mcp: Option<mcp::http::McpHttpHandle>,
 }
 
 /// MIDI + UI state. The engine thread `try_lock`s this to tick; the UI
@@ -113,6 +118,10 @@ pub(crate) struct EngineInner {
     pub(crate) pe_note: String,
     pub(crate) device_idx: usize,
     pub(crate) net: NetUmp,
+    pub(crate) agent_listen: bool,
+    pub(crate) agent_armed: bool,
+    pub(crate) agent_port: u16,
+    pub(crate) agent_status: String,
 }
 
 impl MidiForgeApp {
@@ -129,13 +138,52 @@ impl MidiForgeApp {
             .name("midi-engine".into())
             .spawn(move || engine_loop(worker, halt))
             .expect("midi-engine thread");
-        Self { inner, stop }
+        Self {
+            inner,
+            stop,
+            mcp: None,
+        }
+    }
+
+    fn sync_mcp_http(&mut self) {
+        let (listen, port) = {
+            let eng = self.eng();
+            (eng.agent_listen, eng.agent_port)
+        };
+        if listen && self.mcp.is_none() {
+            match mcp::http::spawn(Arc::clone(&self.inner), port) {
+                Ok(handle) => {
+                    let local = handle.local_addr;
+                    {
+                        let mut eng = self.eng();
+                        eng.agent_status = format!("{local}/mcp");
+                    }
+                    self.mcp = Some(handle);
+                }
+                Err(err) => {
+                    let mut eng = self.eng();
+                    eng.agent_listen = false;
+                    eng.agent_status = err;
+                }
+            }
+        } else if !listen {
+            if let Some(handle) = self.mcp.take() {
+                handle.shutdown();
+                let mut eng = self.eng();
+                if eng.agent_status.contains("/mcp") {
+                    eng.agent_status.clear();
+                }
+            }
+        }
     }
 }
 
 impl Drop for MidiForgeApp {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.mcp.take() {
+            handle.shutdown();
+        }
     }
 }
 
@@ -239,6 +287,10 @@ impl EngineInner {
             pe_note: String::new(),
             device_idx: 0,
             net: NetUmp::default(),
+            agent_listen: false,
+            agent_armed: false,
+            agent_port: mcp::DEFAULT_MCP_PORT,
+            agent_status: String::new(),
         };
 
         let inputs: Vec<EndpointId> = app
@@ -254,6 +306,122 @@ impl EngineInner {
         }
         app.device_fp = device_fingerprint(&app.endpoints);
         app
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        let mut backend = NullBackend::with_fixture_ports();
+        let _ = backend.refresh();
+        let backend_name = backend.name().to_string();
+        let endpoints = backend.endpoints().to_vec();
+        Self {
+            backend: Box::new(backend),
+            backend_name,
+            endpoints,
+            log: MonitorLog::default(),
+            router: Router::new(),
+            paused: false,
+            follow: true,
+            dropped: 0,
+            open_inputs: HashSet::new(),
+            open_outputs: HashSet::new(),
+            port_names: HashMap::new(),
+            port_by_endpoint: HashMap::new(),
+            stream: HashMap::new(),
+            selected_endpoint: None,
+            endpoint_by_port: HashMap::new(),
+            port_errors: HashMap::new(),
+            selected_link: None,
+            next_port: 1,
+            capture_buf: Vec::new(),
+            status: String::new(),
+            librarian: Librarian::new(),
+            thru_sysex: HashMap::new(),
+            mpe: MpeTracker::new(),
+            mpe_members: 15,
+            cable_name: "Forge Cable".into(),
+            script: midi_forge_script::ScriptEngine::new(),
+            right_tab: RightTab::Sysex,
+            hang: HangTracker::new(),
+            live: LiveView::new(),
+            nrpn: NrpnTracker::new(),
+            wms_note: String::new(),
+            mute_clock: false,
+            inject_channel: 1,
+            inject_octave: 0,
+            inject_velocity: 100,
+            inject_cc: 1,
+            inject_cc_val: 0,
+            inject_dest: None,
+            held_keys: HashSet::new(),
+            mon_search: String::new(),
+            mon_notes: true,
+            mon_cc: true,
+            mon_clock: true,
+            mon_sysex: true,
+            mon_sysex8: true,
+            mon_utility: true,
+            mon_flex: true,
+            mon_stream: true,
+            mon_jr_clock: false,
+            mon_other: true,
+            mon_channel: 0,
+            activity: HashMap::new(),
+            last_hotplug: Instant::now(),
+            device_fp: String::new(),
+            clock: ClockHealth::new(),
+            routes: RouteLog::default(),
+            learn: None,
+            always_on_top: false,
+            host_epoch: Instant::now(),
+            scene_name: "Default".into(),
+            scenes: Vec::new(),
+            pack_idx: 0,
+            throttle_ms: 0,
+            throttle_q: HashMap::new(),
+            throttle_at: HashMap::new(),
+            master: ClockMaster::new(),
+            master_dest: None,
+            inject_m2: false,
+            inject_group: 0,
+            inject_attr: 0,
+            inject_pn_note: 60,
+            inject_pn_val: 0x8000_0000,
+            inject_rc_bank: 0,
+            inject_rc_index: 6,
+            inject_rc_val: 0x8000_0000,
+            recorder: SessionRecorder::default(),
+            pe_header: String::new(),
+            pe_body: String::new(),
+            pe_note: String::new(),
+            device_idx: 0,
+            net: NetUmp::default(),
+            agent_listen: false,
+            agent_armed: false,
+            agent_port: mcp::DEFAULT_MCP_PORT,
+            agent_status: String::new(),
+        }
+    }
+
+    pub(crate) fn mcp_monitor_rows(&self, limit: usize) -> Vec<mcp::host::MonitorRow> {
+        use mcp::host::{MonitorRow, format_ump_words};
+        let n = self.log.len();
+        let start = n.saturating_sub(limit);
+        (start..n)
+            .filter_map(|i| {
+                let ev = self.log.get(i)?;
+                Some(MonitorRow {
+                    time_ns: ev.time.nanos,
+                    port: self
+                        .port_names
+                        .get(&ev.port)
+                        .cloned()
+                        .unwrap_or_else(|| format!("port {}", ev.port.0)),
+                    ump_words: format_ump_words(&ev.packet),
+                    decoded: decode(&ev.packet).summary(),
+                })
+            })
+            .collect()
     }
 
     pub(crate) fn tick(&mut self) {
@@ -910,8 +1078,11 @@ impl eframe::App for MidiForgeApp {
             sysex::tick_send(&mut eng, ui.ctx());
         }
         ui.ctx().request_repaint_after(Duration::from_millis(16));
-        let mut eng = self.eng();
-        EngineInner::ui(&mut eng, ui, frame);
+        {
+            let mut eng = self.eng();
+            EngineInner::ui(&mut eng, ui, frame);
+        }
+        self.sync_mcp_http();
     }
 }
 
@@ -1004,6 +1175,16 @@ impl EngineInner {
                     .on_hover_text(
                         "Drop MIDI clock, active sensing, and UMP JR Clock on thru. Monitor still shows them if their type filters are on.",
                     );
+                ui.checkbox(&mut self.agent_listen, "Agent").on_hover_text(
+                    format!(
+                        "127.0.0.1:{} MCP. Writes disabled until Arm.",
+                        self.agent_port
+                    ),
+                );
+                ui.checkbox(&mut self.agent_armed, "Arm writes");
+                if !self.agent_status.is_empty() {
+                    ui.weak(&self.agent_status);
+                }
                 ui.checkbox(&mut self.follow, "Follow");
                 ui.separator();
                 ui.label(format!("{} events", self.log.len()));

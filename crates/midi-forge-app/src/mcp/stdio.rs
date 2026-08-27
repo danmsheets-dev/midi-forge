@@ -9,10 +9,10 @@ use rmcp::service::ServiceExt;
 use rmcp::{ErrorData, ServerHandler, schemars, tool, tool_handler, tool_router};
 use serde::Deserialize;
 
+use super::DEFAULT_MCP_PORT;
 use super::host::{McpHost, StandaloneHost};
 use super::tools;
 
-const DEFAULT_MCP_PORT: u16 = 7420;
 const DEFAULT_PROBE_HOST: &str = "127.0.0.1";
 const ATTACH_FAIL: &str = "GUI MCP not listening; standalone session";
 const GUI_LISTENING: &str =
@@ -212,12 +212,12 @@ fn tool_text(result: Result<String, String>) -> Result<CallToolResult, ErrorData
 }
 
 #[derive(Clone)]
-struct ForgeMcp {
-    host: Arc<Mutex<StandaloneHost>>,
+pub(crate) struct ForgeMcp {
+    host: Arc<Mutex<dyn McpHost>>,
 }
 
 impl ForgeMcp {
-    fn new(host: StandaloneHost) -> Self {
+    pub(crate) fn new(host: impl McpHost + 'static) -> Self {
         Self {
             host: Arc::new(Mutex::new(host)),
         }

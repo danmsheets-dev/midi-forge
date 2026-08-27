@@ -1,10 +1,13 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use midi_forge_core::{
     ClockHealth, HangTracker, LiveView, MidiEvent, MonitorLog, MpeTracker, PortId, Router,
     Timestamp, UmpMessage, decode,
 };
 use midi_forge_io::{Direction, Endpoint, EndpointId, MidiBackend, NullBackend, default_backend};
+
+use crate::app::EngineInner;
 
 /// Underscore-grouped hex of `packet.words()`, e.g. `2090_3C64`.
 pub fn format_ump_words(packet: &UmpMessage) -> String {
@@ -34,7 +37,9 @@ pub struct MonitorRow {
 }
 
 /// Session the technician tools read and (when armed) write.
-pub trait McpHost {
+pub trait McpHost: Send {
+    /// Drain captured MIDI (standalone). Live GUI already ticks; default is a no-op.
+    fn poll(&mut self) {}
     fn armed(&self) -> bool;
     fn set_armed(&mut self, armed: bool);
     fn list_endpoints(&self) -> Vec<EndpointInfo>;
@@ -368,6 +373,10 @@ fn filter_off_flags(filter: &midi_forge_core::Filter) -> Vec<&'static str> {
 }
 
 impl McpHost for StandaloneHost {
+    fn poll(&mut self) {
+        StandaloneHost::poll(self);
+    }
+
     fn armed(&self) -> bool {
         self.armed
     }
@@ -543,6 +552,224 @@ impl McpHost for StandaloneHost {
     }
 }
 
+/// Live GUI session. Locks `EngineInner` only for the duration of each call.
+#[derive(Clone)]
+pub struct LiveHost {
+    inner: Arc<Mutex<EngineInner>>,
+}
+
+impl LiveHost {
+    pub fn new(inner: Arc<Mutex<EngineInner>>) -> Self {
+        Self { inner }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, EngineInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+fn live_port_label(inner: &EngineInner, port: PortId) -> String {
+    inner
+        .port_names
+        .get(&port)
+        .cloned()
+        .unwrap_or_else(|| format!("port {}", port.0))
+}
+
+fn live_is_open(inner: &EngineInner, ep: &Endpoint) -> bool {
+    match ep.direction {
+        Direction::Input => inner.open_inputs.contains(&ep.id.0),
+        Direction::Output => inner.open_outputs.contains(&ep.id.0),
+        Direction::Bidirectional => {
+            inner.open_inputs.contains(&ep.id.0) || inner.open_outputs.contains(&ep.id.0)
+        }
+    }
+}
+
+fn live_find_ep(inner: &EngineInner, needle: &str, outputs: bool) -> Result<Endpoint, String> {
+    require_dest(needle)?;
+    let n = needle.to_ascii_lowercase();
+    let eps = &inner.endpoints;
+    if let Some(ep) = eps.iter().find(|e| e.id.0 == needle) {
+        return Ok(ep.clone());
+    }
+    eps.iter()
+        .filter(|e| match (outputs, e.direction) {
+            (true, Direction::Output | Direction::Bidirectional) => true,
+            (false, Direction::Input | Direction::Bidirectional) => true,
+            _ => false,
+        })
+        .find(|e| {
+            e.name.to_ascii_lowercase().contains(&n) || e.id.0.to_ascii_lowercase().contains(&n)
+        })
+        .cloned()
+        .ok_or_else(|| {
+            let dir = if outputs { "output" } else { "input" };
+            format!("no {dir} matching {needle:?}")
+        })
+}
+
+fn live_find_any(inner: &EngineInner, needle: &str) -> Result<Endpoint, String> {
+    require_dest(needle)?;
+    let n = needle.to_ascii_lowercase();
+    inner
+        .endpoints
+        .iter()
+        .find(|e| {
+            e.id.0 == needle
+                || e.name.to_ascii_lowercase().contains(&n)
+                || e.id.0.to_ascii_lowercase().contains(&n)
+        })
+        .cloned()
+        .ok_or_else(|| format!("no endpoint matching {needle:?}"))
+}
+
+impl McpHost for LiveHost {
+    fn armed(&self) -> bool {
+        self.lock().agent_armed
+    }
+
+    fn set_armed(&mut self, armed: bool) {
+        self.lock().agent_armed = armed;
+    }
+
+    fn list_endpoints(&self) -> Vec<EndpointInfo> {
+        let inner = self.lock();
+        inner
+            .endpoints
+            .iter()
+            .map(|e| EndpointInfo {
+                id: e.id.0.clone(),
+                name: e.name.clone(),
+                direction: direction_label(e.direction).into(),
+                protocol: e.protocol.label().into(),
+                open: live_is_open(&inner, e),
+            })
+            .collect()
+    }
+
+    fn monitor_tail(&self, limit: usize) -> Vec<MonitorRow> {
+        let inner = self.lock();
+        inner.mcp_monitor_rows(limit)
+    }
+
+    fn live_dump(&self) -> String {
+        self.lock().live.dump()
+    }
+
+    fn clock_summary(&self) -> String {
+        let inner = self.lock();
+        let mut s = inner.clock.summary();
+        if inner.master.enabled {
+            s.push_str(&format!("  master {:.1} BPM", inner.master.bpm));
+            if inner.master.running() {
+                s.push_str(" running");
+            }
+        }
+        s
+    }
+
+    fn stuck_notes(&self) -> Vec<String> {
+        self.lock()
+            .hang
+            .notes()
+            .into_iter()
+            .map(|n| format!("Ch{} note {}", n.channel + 1, n.note))
+            .collect()
+    }
+
+    fn thru_graph(&self) -> String {
+        let inner = self.lock();
+        let links = inner.router.links();
+        if links.is_empty() {
+            return "none".into();
+        }
+        let mut lines = Vec::new();
+        for link in links {
+            let from = live_port_label(&inner, link.from);
+            let to = live_port_label(&inner, link.to);
+            let off = filter_off_flags(&link.filter);
+            if off.is_empty() {
+                lines.push(format!("{from} → {to}"));
+            } else {
+                lines.push(format!("{from} → {to}  ({} off)", off.join(", ")));
+            }
+        }
+        lines.join("\n")
+    }
+
+    fn mpe_status(&self) -> String {
+        let inner = self.lock();
+        let mut s = inner.mpe.mode_summary();
+        s.push('\n');
+        if inner.mpe.voices().is_empty() {
+            s.push_str("No sounding MPE notes.");
+        } else {
+            for v in inner.mpe.voices() {
+                s.push_str(&format!(
+                    "Ch{} note {} vel {}\n",
+                    v.channel + 1,
+                    v.note,
+                    v.velocity
+                ));
+            }
+        }
+        s
+    }
+
+    fn snapshot(&self) -> String {
+        self.lock().snapshot_text()
+    }
+
+    fn send(&mut self, dest: &str, packet: &UmpMessage) -> Result<(), String> {
+        let mut inner = self.lock();
+        if !inner.agent_armed {
+            return Err("writes disabled until arm".into());
+        }
+        let ep = live_find_ep(&inner, dest, true)?;
+        inner.set_output_open(&ep.id, true)?;
+        inner.hang.push(packet);
+        inner.live.push(packet);
+        inner.send_packet(&ep.id, packet)
+    }
+
+    fn send_sysex(&mut self, dest: &str, bytes: &[u8]) -> Result<(), String> {
+        let mut inner = self.lock();
+        if !inner.agent_armed {
+            return Err("writes disabled until arm".into());
+        }
+        let ep = live_find_ep(&inner, dest, true)?;
+        inner.set_output_open(&ep.id, true)?;
+        inner.send_sysex_now(&ep.id, bytes)
+    }
+
+    fn set_port_open(&mut self, id: &str, output: bool, open: bool) -> Result<(), String> {
+        let mut inner = self.lock();
+        if !inner.agent_armed {
+            return Err("writes disabled until arm".into());
+        }
+        let ep = live_find_any(&inner, id)?;
+        if output {
+            if ep.direction == Direction::Input {
+                return Err(format!("{} is an input", ep.name));
+            }
+            inner.set_output_open(&ep.id, open)
+        } else {
+            if ep.direction == Direction::Output {
+                return Err(format!("{} is an output", ep.name));
+            }
+            inner.set_input_open(&ep.id, open)
+        }
+    }
+
+    fn open_outputs(&self) -> Vec<String> {
+        let inner = self.lock();
+        let mut ids: Vec<String> = inner.open_outputs.iter().cloned().collect();
+        ids.sort();
+        ids
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -582,5 +809,48 @@ mod tests {
         assert!(host.set_port_open(" \t", false, true).is_err());
         assert!(host.open_outputs().is_empty());
         assert!(host.open_inputs.is_empty());
+    }
+
+    #[test]
+    fn live_host_writes_fail_when_unarmed() {
+        let inner = Arc::new(Mutex::new(EngineInner::for_test()));
+        let mut host = LiveHost::new(Arc::clone(&inner));
+        let packet = UmpMessage::midi1_channel_voice(0, 0x90, 60, 100);
+        let send_err = host.send("null:out:0", &packet).unwrap_err();
+        assert!(send_err.to_lowercase().contains("arm"));
+        let sysex_err = host
+            .send_sysex("null:out:0", &IDENTITY_REQUEST)
+            .unwrap_err();
+        assert!(sysex_err.to_lowercase().contains("arm"));
+        let port_err = host.set_port_open("null:out:0", true, true).unwrap_err();
+        assert!(port_err.to_lowercase().contains("arm"));
+        assert!(host.open_outputs().is_empty());
+        assert!(!host.armed());
+        let tool_err = crate::mcp::tools::send_note(
+            &mut host,
+            crate::mcp::tools::SendNote {
+                out: "Null Synth".into(),
+                note: 60,
+                vel: 100,
+                ch: 1,
+                group: 0,
+                m2: false,
+            },
+        )
+        .unwrap_err();
+        assert!(tool_err.to_lowercase().contains("arm"));
+    }
+
+    #[test]
+    fn live_host_send_when_armed() {
+        let inner = Arc::new(Mutex::new(EngineInner::for_test()));
+        let mut host = LiveHost::new(Arc::clone(&inner));
+        host.set_armed(true);
+        let packet = UmpMessage::midi1_channel_voice(0, 0x90, 60, 100);
+        host.send("Null Synth", &packet).unwrap();
+        assert!(host.open_outputs().iter().any(|id| id == "null:out:0"));
+        let json = crate::mcp::tools::list_endpoints(&mut host).unwrap();
+        assert!(json.contains("Null Keyboard"));
+        assert!(json.contains("Null Synth"));
     }
 }
