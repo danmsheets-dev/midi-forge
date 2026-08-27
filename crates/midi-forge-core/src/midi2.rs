@@ -171,7 +171,14 @@ pub fn upscale_to_midi2(packet: &UmpMessage) -> UmpMessage {
     let ch = status & 0x0F;
     match status & 0xF0 {
         0x80 => midi2_note_off_attr(group, ch, d1, velocity7_to_16(d2), 0, 0),
-        0x90 => midi2_note_on_attr(group, ch, d1, velocity7_to_16(d2), 0, 0),
+        // M2-104-UM D.3: MIDI 1 Note On vel 0 SHALL become MIDI 2 Note Off (vel 0).
+        0x90 => {
+            if d2 == 0 {
+                midi2_note_off_attr(group, ch, d1, velocity7_to_16(d2), 0, 0)
+            } else {
+                midi2_note_on_attr(group, ch, d1, velocity7_to_16(d2), 0, 0)
+            }
+        }
         0xA0 => UmpMessage::midi2_channel_voice(group, status, d1, 0, value7_to_32(d2)),
         0xB0 => midi2_cc(group, ch, d1, value7_to_32(d2)),
         0xC0 => UmpMessage::midi2_channel_voice(group, status, 0, 0, u32::from(d1) << 24),
@@ -526,11 +533,13 @@ mod tests {
     }
 
     #[test]
-    fn upscale_note_on_zero_velocity_stays_note_on() {
-        let m1 = UmpMessage::midi1_channel_voice(0, 0x90, 60, 0);
+    fn upscale_note_on_zero_velocity_becomes_note_off() {
+        // M2-104-UM D.3: MIDI 1 Note On vel 0 SHALL become MIDI 2 Note Off (vel 0).
+        let m1 = UmpMessage::midi1_channel_voice(2, 0x93, 60, 0);
         let m2 = upscale_to_midi2(&m1);
         assert_eq!(m2.message_type(), 0x4);
-        assert_eq!(m2.status_byte(), 0x90);
+        assert_eq!(m2.status_byte(), 0x83);
+        assert_eq!(m2.group(), 2);
         assert_eq!(m2.data1(), 60);
         assert_eq!(m2.words()[1] >> 16, 0);
     }
