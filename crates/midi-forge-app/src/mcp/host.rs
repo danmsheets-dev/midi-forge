@@ -146,7 +146,30 @@ impl StandaloneHost {
         port
     }
 
+    #[cfg(test)]
+    pub(crate) fn add_named_loopback(&mut self, name: &str) {
+        let (a, b) = self.backend.create_loopback(name).expect("loopback");
+        self.ensure_port(&a);
+        self.ensure_port(&b);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn relabel_ports(&mut self, name: &str) {
+        for label in self.port_names.values_mut() {
+            *label = name.to_string();
+        }
+    }
+
+    fn require_armed(&self) -> Result<(), String> {
+        if self.armed {
+            Ok(())
+        } else {
+            Err("writes disabled until arm".into())
+        }
+    }
+
     fn find_ep(&self, needle: &str, outputs: bool) -> Result<Endpoint, String> {
+        require_dest(needle)?;
         let n = needle.to_ascii_lowercase();
         let eps = self.backend.endpoints();
         if let Some(ep) = eps.iter().find(|e| e.id.0 == needle) {
@@ -169,6 +192,7 @@ impl StandaloneHost {
     }
 
     fn find_any(&self, needle: &str) -> Result<Endpoint, String> {
+        require_dest(needle)?;
         let n = needle.to_ascii_lowercase();
         self.backend
             .endpoints()
@@ -209,6 +233,14 @@ impl StandaloneHost {
                 self.open_inputs.contains(&ep.id.0) || self.open_outputs.contains(&ep.id.0)
             }
         }
+    }
+}
+
+fn require_dest(needle: &str) -> Result<(), String> {
+    if needle.trim().is_empty() {
+        Err("empty destination".into())
+    } else {
+        Ok(())
     }
 }
 
@@ -396,6 +428,7 @@ impl McpHost for StandaloneHost {
     }
 
     fn send(&mut self, dest: &str, packet: &UmpMessage) -> Result<(), String> {
+        self.require_armed()?;
         let ep = self.find_ep(dest, true)?;
         self.ensure_output_open(&ep.id)?;
         self.hang.push(packet);
@@ -404,6 +437,7 @@ impl McpHost for StandaloneHost {
     }
 
     fn send_sysex(&mut self, dest: &str, bytes: &[u8]) -> Result<(), String> {
+        self.require_armed()?;
         let ep = self.find_ep(dest, true)?;
         self.ensure_output_open(&ep.id)?;
         self.backend
@@ -412,6 +446,7 @@ impl McpHost for StandaloneHost {
     }
 
     fn set_port_open(&mut self, id: &str, output: bool, open: bool) -> Result<(), String> {
+        self.require_armed()?;
         let ep = self.find_any(id)?;
         if output {
             if ep.direction == Direction::Input {
@@ -449,5 +484,47 @@ impl McpHost for StandaloneHost {
         let mut ids: Vec<String> = self.open_outputs.iter().cloned().collect();
         ids.sort();
         ids
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use midi_forge_core::IDENTITY_REQUEST;
+
+    #[test]
+    fn writes_fail_when_unarmed() {
+        let mut host = StandaloneHost::with_null();
+        let packet = UmpMessage::midi1_channel_voice(0, 0x90, 60, 100);
+        let send_err = host.send("null:out:0", &packet).unwrap_err();
+        assert!(send_err.to_lowercase().contains("arm"));
+        assert!(host.sent().is_empty());
+
+        let sysex_err = host
+            .send_sysex("null:out:0", &IDENTITY_REQUEST)
+            .unwrap_err();
+        assert!(sysex_err.to_lowercase().contains("arm"));
+        assert!(host.sent_sysex().is_empty());
+
+        let port_err = host.set_port_open("null:out:0", true, true).unwrap_err();
+        assert!(port_err.to_lowercase().contains("arm"));
+        assert!(host.open_outputs().is_empty());
+    }
+
+    #[test]
+    fn writes_reject_empty_destination() {
+        let mut host = StandaloneHost::with_null();
+        host.set_armed(true);
+        let packet = UmpMessage::midi1_channel_voice(0, 0x90, 60, 100);
+        assert!(host.send("", &packet).is_err());
+        assert!(host.send("   ", &packet).is_err());
+        assert!(host.sent().is_empty());
+        assert!(host.send_sysex("", &IDENTITY_REQUEST).is_err());
+        assert!(host.send_sysex("\t", &IDENTITY_REQUEST).is_err());
+        assert!(host.sent_sysex().is_empty());
+        assert!(host.set_port_open("", true, true).is_err());
+        assert!(host.set_port_open(" \t", false, true).is_err());
+        assert!(host.open_outputs().is_empty());
+        assert!(host.open_inputs.is_empty());
     }
 }

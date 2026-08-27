@@ -49,27 +49,14 @@ fn clamp_limit(limit: usize) -> usize {
     if limit == 0 { 40 } else { limit.clamp(1, 200) }
 }
 
-fn json_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 fn describe_packet(packet: &UmpMessage) -> String {
     format!("{}  {}", decode(packet).summary(), format_ump_words(packet))
 }
 
 fn find_output(host: &dyn McpHost, needle: &str) -> Result<EndpointInfo, String> {
+    if needle.trim().is_empty() {
+        return Err("empty destination".into());
+    }
     let n = needle.to_ascii_lowercase();
     host.list_endpoints()
         .into_iter()
@@ -89,42 +76,36 @@ fn group(g: u8) -> u8 {
 }
 
 pub fn list_endpoints(host: &mut dyn McpHost) -> Result<String, String> {
-    let eps = host.list_endpoints();
-    let mut s = String::from("[");
-    for (i, e) in eps.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push_str(&format!(
-            "{{\"id\":\"{}\",\"name\":\"{}\",\"direction\":\"{}\",\"protocol\":\"{}\",\"open\":{}}}",
-            json_escape(&e.id),
-            json_escape(&e.name),
-            json_escape(&e.direction),
-            json_escape(&e.protocol),
-            e.open
-        ));
-    }
-    s.push(']');
-    Ok(s)
+    let values: Vec<serde_json::Value> = host
+        .list_endpoints()
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "name": e.name,
+                "direction": e.direction,
+                "protocol": e.protocol,
+                "open": e.open,
+            })
+        })
+        .collect();
+    serde_json::to_string(&values).map_err(|e| e.to_string())
 }
 
 pub fn monitor_tail(host: &mut dyn McpHost, limit: usize) -> Result<String, String> {
-    let rows = host.monitor_tail(clamp_limit(limit));
-    let mut s = String::from("[");
-    for (i, row) in rows.iter().enumerate() {
-        if i > 0 {
-            s.push(',');
-        }
-        s.push_str(&format!(
-            "{{\"time_ns\":{},\"port\":\"{}\",\"ump_words\":\"{}\",\"decoded\":\"{}\"}}",
-            row.time_ns,
-            json_escape(&row.port),
-            json_escape(&row.ump_words),
-            json_escape(&row.decoded)
-        ));
-    }
-    s.push(']');
-    Ok(s)
+    let values: Vec<serde_json::Value> = host
+        .monitor_tail(clamp_limit(limit))
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "time_ns": row.time_ns,
+                "port": row.port,
+                "ump_words": row.ump_words,
+                "decoded": row.decoded,
+            })
+        })
+        .collect();
+    serde_json::to_string(&values).map_err(|e| e.to_string())
 }
 
 pub fn live_now(host: &mut dyn McpHost) -> Result<String, String> {
@@ -451,6 +432,66 @@ mod tests {
         )
         .unwrap();
         assert!(host.open_outputs().is_empty());
+    }
+
+    #[test]
+    fn send_note_rejects_empty_out() {
+        let mut host = StandaloneHost::with_null();
+        host.set_armed(true);
+        for out in ["", "   ", "\t"] {
+            let err = crate::mcp::tools::send_note(
+                &mut host,
+                crate::mcp::tools::SendNote {
+                    out: out.into(),
+                    note: 60,
+                    vel: 100,
+                    ch: 1,
+                    group: 0,
+                    m2: false,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                !err.to_lowercase().contains("noteon"),
+                "empty out must not send to first port: {err}"
+            );
+            assert!(host.sent().is_empty(), "empty out must not send: {out:?}");
+        }
+    }
+
+    #[test]
+    fn list_and_monitor_json_survives_quotes_and_backslashes() {
+        let mut host = StandaloneHost::with_null();
+        host.add_named_loopback(r#"Quote "and" \slash"#);
+        let json = crate::mcp::tools::list_endpoints(&mut host).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("list_endpoints JSON must parse");
+        let names: Vec<&str> = parsed
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            names.iter().any(|n| n.contains('"') && n.contains('\\')),
+            "expected quoted/backslash port name in {names:?}"
+        );
+
+        host.relabel_ports(r#"port "x" \y"#);
+        host.push_note();
+        let tail = crate::mcp::tools::monitor_tail(&mut host, 10).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tail).expect("monitor_tail JSON must parse");
+        let ports: Vec<&str> = parsed
+            .as_array()
+            .expect("array")
+            .iter()
+            .filter_map(|v| v.get("port").and_then(|n| n.as_str()))
+            .collect();
+        assert!(
+            ports.iter().any(|p| p.contains('"') && p.contains('\\')),
+            "expected quoted/backslash port in {ports:?}"
+        );
     }
 
     #[test]
