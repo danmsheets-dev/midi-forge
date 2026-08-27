@@ -71,10 +71,14 @@ pub fn mpe_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
         }
     });
 
-    egui::ScrollArea::vertical()
-        .max_height(120.0)
-        .id_salt("mpe_voices")
-        .show(ui, |ui| {
+    let voice_h = 120.0;
+    ui.allocate_ui(egui::vec2(ui.available_width(), voice_h), |ui| {
+        egui::ScrollArea::vertical()
+            .max_height(voice_h)
+            .min_scrolled_height(voice_h)
+            .auto_shrink([false, false])
+            .id_salt("mpe_voices")
+            .show(ui, |ui| {
             if app.mpe.voices().is_empty() {
                 ui.weak("No sounding MPE notes.");
                 return;
@@ -107,7 +111,8 @@ pub fn mpe_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
                     mini_bar(ui, v.timbre, egui::Color32::from_rgb(200, 140, 80));
                 });
             }
-        });
+            });
+    });
 }
 
 fn mini_bar(ui: &mut egui::Ui, value: u8, color: egui::Color32) {

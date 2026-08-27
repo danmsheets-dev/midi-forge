@@ -16,10 +16,14 @@ pub fn live_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
         }
     });
     let row_h = 16.0;
-    egui::ScrollArea::vertical()
-        .max_height(16.0 * 9.0)
-        .id_salt("live_view")
-        .show(ui, |ui| {
+    let live_h = row_h * 9.0;
+    ui.allocate_ui(egui::vec2(ui.available_width(), live_h), |ui| {
+        egui::ScrollArea::vertical()
+            .max_height(live_h)
+            .min_scrolled_height(live_h)
+            .auto_shrink([false, false])
+            .id_salt("live_view")
+            .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.monospace(egui::RichText::new("Ch").strong());
                 ui.monospace(egui::RichText::new("Note").strong());
@@ -75,8 +79,11 @@ pub fn live_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
                     }
                 });
             }
-        });
+            });
+    });
     if let Some(p) = app.nrpn.last() {
         ui.weak(p.summary());
+    } else {
+        ui.weak("NRPN —");
     }
 }

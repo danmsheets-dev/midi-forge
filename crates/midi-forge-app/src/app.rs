@@ -1314,10 +1314,11 @@ fn net_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
 
 fn stuck_notes_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     let notes = app.hang.notes();
-    if notes.is_empty() {
-        return;
-    }
     ui.horizontal_wrapped(|ui| {
+        if notes.is_empty() {
+            ui.weak("No stuck notes");
+            return;
+        }
         ui.colored_label(
             egui::Color32::from_rgb(220, 140, 40),
             format!("{} stuck", notes.len()),

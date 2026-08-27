@@ -27,6 +27,8 @@ pub fn clock_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
             note_mean / 1_000_000,
             app.clock.notes.jitter_ns().unwrap_or(0) / 1000
         ));
+    } else {
+        ui.weak("note-on gap —");
     }
 }
 
