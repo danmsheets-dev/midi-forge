@@ -25,7 +25,8 @@ pub fn ump_dctpq(ticks_per_qn: u16) -> UmpMessage {
     utility(3, ticks_per_qn)
 }
 
-/// Delta Clockstamp (clip timing).
-pub fn ump_delta_clockstamp(ticks: u16) -> UmpMessage {
-    utility(4, ticks)
+/// Delta Clockstamp (clip timing). 20-bit tick count in bits 19–0.
+pub fn ump_delta_clockstamp(ticks: u32) -> UmpMessage {
+    let word = (0x4u32 << 20) | (ticks & 0xF_FFFF);
+    UmpMessage::from_word(word).expect("UMP type 0 is one word")
 }

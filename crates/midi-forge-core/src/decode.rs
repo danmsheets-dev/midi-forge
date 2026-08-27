@@ -180,7 +180,7 @@ pub enum Decoded {
         ticks_per_qn: u16,
     },
     DeltaClockstamp {
-        ticks: u16,
+        ticks: u32,
     },
     Other {
         message_type: u8,
@@ -455,19 +455,22 @@ pub fn decode(msg: &UmpMessage) -> Decoded {
 }
 
 fn decode_utility(msg: &UmpMessage) -> Decoded {
-    let ticks = (msg.words()[0] & 0xFFFF) as u16;
-    match msg.status_byte() {
-        0x00 => Decoded::Noop,
-        0x10 => Decoded::JrClock { ticks },
-        0x20 => Decoded::JrTimestamp { ticks },
-        0x30 => Decoded::Dctpq {
-            ticks_per_qn: ticks,
+    let word0 = msg.words()[0];
+    let ticks16 = (word0 & 0xFFFF) as u16;
+    match msg.status_byte() >> 4 {
+        0x0 => Decoded::Noop,
+        0x1 => Decoded::JrClock { ticks: ticks16 },
+        0x2 => Decoded::JrTimestamp { ticks: ticks16 },
+        0x3 => Decoded::Dctpq {
+            ticks_per_qn: ticks16,
         },
-        0x40 => Decoded::DeltaClockstamp { ticks },
-        other => Decoded::Other {
+        0x4 => Decoded::DeltaClockstamp {
+            ticks: word0 & 0xF_FFFF,
+        },
+        _ => Decoded::Other {
             message_type: 0x0,
             group: msg.group(),
-            status: other,
+            status: msg.status_byte(),
         },
     }
 }
@@ -874,5 +877,34 @@ mod tests {
         let dc = ump_delta_clockstamp(16);
         assert_eq!(dc.words()[0], 0x0040_0010);
         assert_eq!(decode(&dc), Decoded::DeltaClockstamp { ticks: 16 });
+    }
+
+    #[test]
+    fn delta_clockstamp_decodes_20_bit_ticks() {
+        // UMP 1.1 DC: bits 31–28 MT 0, 27–24 0, 23–20 status 4, 19–0 ticks.
+        // ticks 0x1_2345 → word 0x0041_2345 (status_byte is 0x41, not 0x40).
+        let m = UmpMessage::from_word(0x0041_2345).unwrap();
+        assert_eq!(decode(&m), Decoded::DeltaClockstamp { ticks: 0x12345 });
+        assert_eq!(decode(&m).kind_key(), "delta_clockstamp");
+        assert_eq!(decode(&m).summary(), "Delta Clockstamp 74565");
+
+        let dc = crate::ump_delta_clockstamp(0x1_2345);
+        assert_eq!(dc.words()[0], 0x0041_2345);
+        assert_eq!(decode(&dc), Decoded::DeltaClockstamp { ticks: 0x12345 });
+
+        // Constructor masks to 20 bits.
+        let masked = crate::ump_delta_clockstamp(0xF1_2345);
+        assert_eq!(masked.words()[0], 0x0041_2345);
+    }
+
+    #[test]
+    fn utility_decode_matches_status_nibble() {
+        // Reserved bits 19–16 must not break 16-bit JR/DCTPQ payloads.
+        let clock = UmpMessage::from_word(0x001F_00AB).unwrap();
+        assert_eq!(decode(&clock), Decoded::JrClock { ticks: 0x00AB });
+        let ts = UmpMessage::from_word(0x002A_0100).unwrap();
+        assert_eq!(decode(&ts), Decoded::JrTimestamp { ticks: 0x0100 });
+        let dctpq = UmpMessage::from_word(0x0031_01E0).unwrap();
+        assert_eq!(decode(&dctpq), Decoded::Dctpq { ticks_per_qn: 480 });
     }
 }
