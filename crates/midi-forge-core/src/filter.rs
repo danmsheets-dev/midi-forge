@@ -12,6 +12,7 @@ pub enum MessageKind {
     ChannelPressure,
     PitchBend,
     Sysex,
+    Sysex8,
     Clock,
     Transport,
     ActiveSensing,
@@ -47,6 +48,7 @@ pub fn message_kind(msg: &UmpMessage) -> MessageKind {
         },
         0x0 => MessageKind::Utility,
         0x3 => MessageKind::Sysex,
+        0x5 => MessageKind::Sysex8,
         0x1 => match msg.status_byte() {
             0xF8 => MessageKind::Clock,
             0xFA..=0xFC => MessageKind::Transport,
@@ -70,6 +72,9 @@ pub struct Filter {
     pub channel_pressure: bool,
     pub pitch_bend: bool,
     pub sysex: bool,
+    /// UMP type 0x5 SysEx8 and MixData. Missing field defaults true.
+    #[serde(default = "default_true")]
+    pub sysex8: bool,
     pub clock: bool,
     pub transport: bool,
     pub active_sensing: bool,
@@ -98,6 +103,7 @@ impl Default for Filter {
             channel_pressure: true,
             pitch_bend: true,
             sysex: true,
+            sysex8: true,
             clock: true,
             transport: true,
             active_sensing: true,
@@ -144,6 +150,7 @@ impl Filter {
             MessageKind::ChannelPressure => self.channel_pressure,
             MessageKind::PitchBend => self.pitch_bend,
             MessageKind::Sysex => self.sysex,
+            MessageKind::Sysex8 => self.sysex8,
             MessageKind::Clock => self.clock,
             MessageKind::Transport => self.transport,
             MessageKind::ActiveSensing => self.active_sensing,
@@ -298,5 +305,34 @@ mod tests {
         let json = r#"{"notes":true,"poly_pressure":true,"control_change":true,"program_change":true,"channel_pressure":true,"pitch_bend":true,"sysex":true,"clock":true,"transport":true,"active_sensing":true,"reset":true,"system_common":true,"other":true,"per_note":true,"channels":65535,"force_channel":null}"#;
         let f: Filter = serde_json::from_str(json).unwrap();
         assert!(f.utility);
+        assert!(f.sysex8);
+    }
+
+    #[test]
+    fn type5_sysex8_passes_when_other_is_dropped() {
+        let m = UmpMessage::try_from_words(&[0x5002_AB01, 0, 0, 0]).unwrap();
+        assert_eq!(message_kind(&m), MessageKind::Sysex8);
+        let drop_other = Filter {
+            other: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_other.apply(&m), Some(m));
+        let drop_sysex8 = Filter {
+            sysex8: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_sysex8.apply(&m), None);
+        assert!(Filter::default().apply(&m).is_some());
+    }
+
+    #[test]
+    fn mixdata_shares_sysex8_kind() {
+        let m = UmpMessage::try_from_words(&[0x5285_0000, 0, 0, 0]).unwrap();
+        assert_eq!(message_kind(&m), MessageKind::Sysex8);
+        let drop_sysex8 = Filter {
+            sysex8: false,
+            ..Filter::default()
+        };
+        assert_eq!(drop_sysex8.apply(&m), None);
     }
 }

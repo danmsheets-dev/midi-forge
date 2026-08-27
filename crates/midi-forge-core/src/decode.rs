@@ -69,6 +69,18 @@ pub enum Decoded {
         count: u8,
         data: [u8; 6],
     },
+    SysEx8 {
+        group: u8,
+        status: u8,
+        stream_id: u8,
+        count: u8,
+        data: [u8; 13],
+    },
+    MixData {
+        group: u8,
+        status: u8,
+        mds_id: u8,
+    },
     Midi2NoteOn {
         group: u8,
         channel: u8,
@@ -236,6 +248,12 @@ impl Decoded {
             Self::SongPosition { beats, .. } => format!("SongPos {beats}"),
             Self::MtcQuarter { data, .. } => format!("MTC QF {data:02X}"),
             Self::Sysex7 { count, .. } => format!("SysEx7 {count} bytes"),
+            Self::SysEx8 {
+                count, stream_id, ..
+            } => format!("SysEx8 {count} bytes stream {stream_id}"),
+            Self::MixData { status, mds_id, .. } => {
+                format!("MixData status {status:#X} mds {mds_id}")
+            }
             Self::Midi2NoteOn {
                 channel,
                 note,
@@ -398,6 +416,8 @@ impl Decoded {
             Self::SongPosition { .. } => "song_position",
             Self::MtcQuarter { .. } => "mtc",
             Self::Sysex7 { .. } => "sysex",
+            Self::SysEx8 { .. } => "sysex8",
+            Self::MixData { .. } => "mixdata",
             Self::Midi2NoteOn { .. } => "m2_note_on",
             Self::Midi2NoteOff { .. } => "m2_note_off",
             Self::Midi2ControlChange { .. } => "m2_cc",
@@ -446,6 +466,7 @@ pub fn decode(msg: &UmpMessage) -> Decoded {
         0x2 => decode_midi1_channel(group, msg.words()[0]),
         0x3 => decode_sysex7(group, msg),
         0x4 => decode_midi2_channel(msg),
+        0x5 => decode_data64(group, msg),
         mt => Decoded::Other {
             message_type: mt,
             group,
@@ -663,6 +684,52 @@ fn decode_midi2_channel(msg: &UmpMessage) -> Decoded {
             message_type: 0x4,
             group,
             status,
+        },
+    }
+}
+
+fn decode_data64(group: u8, msg: &UmpMessage) -> Decoded {
+    let w0 = msg.words()[0];
+    let status = ((w0 >> 20) & 0xF) as u8;
+    match status {
+        0..=3 => {
+            let count = ((w0 >> 16) & 0xF) as u8;
+            let stream_id = ((w0 >> 8) & 0xFF) as u8;
+            let w1 = msg.words().get(1).copied().unwrap_or(0);
+            let w2 = msg.words().get(2).copied().unwrap_or(0);
+            let w3 = msg.words().get(3).copied().unwrap_or(0);
+            let data = [
+                (w0 & 0xFF) as u8,
+                ((w1 >> 24) & 0xFF) as u8,
+                ((w1 >> 16) & 0xFF) as u8,
+                ((w1 >> 8) & 0xFF) as u8,
+                (w1 & 0xFF) as u8,
+                ((w2 >> 24) & 0xFF) as u8,
+                ((w2 >> 16) & 0xFF) as u8,
+                ((w2 >> 8) & 0xFF) as u8,
+                (w2 & 0xFF) as u8,
+                ((w3 >> 24) & 0xFF) as u8,
+                ((w3 >> 16) & 0xFF) as u8,
+                ((w3 >> 8) & 0xFF) as u8,
+                (w3 & 0xFF) as u8,
+            ];
+            Decoded::SysEx8 {
+                group,
+                status,
+                stream_id,
+                count,
+                data,
+            }
+        }
+        0x8..=0xB => Decoded::MixData {
+            group,
+            status,
+            mds_id: ((w0 >> 16) & 0xF) as u8,
+        },
+        _ => Decoded::Other {
+            message_type: 0x5,
+            group,
+            status: msg.status_byte(),
         },
     }
 }
@@ -906,5 +973,48 @@ mod tests {
         assert_eq!(decode(&ts), Decoded::JrTimestamp { ticks: 0x0100 });
         let dctpq = UmpMessage::from_word(0x0031_01E0).unwrap();
         assert_eq!(decode(&dctpq), Decoded::Dctpq { ticks_per_qn: 480 });
+    }
+
+    #[test]
+    fn decodes_sysex8_kind_key() {
+        let m = UmpMessage::try_from_words(&[0x501E_AB00, 0x0102_0304, 0x0506_0708, 0x090A_0B0C])
+            .unwrap();
+        match decode(&m) {
+            Decoded::SysEx8 {
+                group,
+                status,
+                stream_id,
+                count,
+                data,
+            } => {
+                assert_eq!(group, 0);
+                assert_eq!(status, 1);
+                assert_eq!(stream_id, 0xAB);
+                assert_eq!(count, 14);
+                assert_eq!(&data, &(0u8..13).collect::<Vec<_>>()[..]);
+            }
+            other => panic!("expected SysEx8, got {other:?}"),
+        }
+        assert_eq!(decode(&m).kind_key(), "sysex8");
+        assert!(decode(&m).summary().contains("SysEx8"));
+    }
+
+    #[test]
+    fn decodes_mixdata_kind_key() {
+        let m = UmpMessage::try_from_words(&[0x5285_0000, 0, 0, 0]).unwrap();
+        match decode(&m) {
+            Decoded::MixData {
+                group,
+                status,
+                mds_id,
+            } => {
+                assert_eq!(group, 2);
+                assert_eq!(status, 8);
+                assert_eq!(mds_id, 5);
+            }
+            other => panic!("expected MixData, got {other:?}"),
+        }
+        assert_eq!(decode(&m).kind_key(), "mixdata");
+        assert!(decode(&m).summary().contains("MixData"));
     }
 }

@@ -28,6 +28,7 @@ mod route;
 mod router;
 mod smf;
 mod sysex;
+mod sysex8;
 mod timing;
 mod ump;
 mod utility;
@@ -78,6 +79,11 @@ pub use smf::{SessionRecorder, events_from_smf0, write_smf0};
 pub use sysex::{
     IDENTITY_REQUEST, IdentityReply, SysexAssembler, SysexDump, SysexError, dumps_from_hex,
     dumps_from_syx, dumps_to_syx, hex_diff, parse_identity_reply, roland_checksum_from_sum,
+};
+pub use sysex8::{
+    MIXDATA_COMPLETE, MIXDATA_END, MIXDATA_HEADER, MIXDATA_PAYLOAD, SYSEX8_COMPLETE,
+    SYSEX8_CONTINUE, SYSEX8_END, SYSEX8_START, Sysex8Assembler, mixdata_packet, sysex8_packet,
+    sysex8_packets,
 };
 pub use timing::{ClockHealth, IntervalHist, MtcState, Transport};
 pub use ump::UmpMessage;

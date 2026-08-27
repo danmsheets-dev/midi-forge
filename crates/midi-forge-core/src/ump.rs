@@ -85,6 +85,28 @@ impl UmpMessage {
         }
     }
 
+    /// SysEx8 (UMP type 0x5), four words.
+    ///
+    /// `status`: 0 complete, 1 start, 2 continue, 3 end.
+    /// `data` is 0–13 payload bytes after the stream id.
+    pub fn sysex8(group: u8, status: u8, stream_id: u8, data: &[u8]) -> Self {
+        let n = data.len().min(13);
+        let b = |i: usize| u32::from(*data.get(i).unwrap_or(&0));
+        let word0 = (0x5 << 28)
+            | (u32::from(group & 0x0F) << 24)
+            | (u32::from(status & 0x0F) << 20)
+            | (((n as u32) + 1) << 16)
+            | (u32::from(stream_id) << 8)
+            | b(0);
+        let word1 = (b(1) << 24) | (b(2) << 16) | (b(3) << 8) | b(4);
+        let word2 = (b(5) << 24) | (b(6) << 16) | (b(7) << 8) | b(8);
+        let word3 = (b(9) << 24) | (b(10) << 16) | (b(11) << 8) | b(12);
+        Self {
+            words: [word0, word1, word2, word3],
+            len: 4,
+        }
+    }
+
     /// SysEx7 (UMP type 0x3), two words.
     ///
     /// `status`: 0 complete, 1 start, 2 continue, 3 end.
@@ -135,6 +157,39 @@ impl UmpMessage {
 
     pub fn data2(&self) -> u8 {
         (self.words[0] & 0xFF) as u8
+    }
+
+    /// SysEx8: (status 0–3, valid byte count including stream id, stream id, payload).
+    pub fn sysex8_parts(&self) -> Option<(u8, u8, u8, [u8; 13])> {
+        if self.message_type() != 0x5 {
+            return None;
+        }
+        let w0 = self.words[0];
+        let status = ((w0 >> 20) & 0xF) as u8;
+        if status > 3 {
+            return None;
+        }
+        let count = ((w0 >> 16) & 0xF) as u8;
+        let stream_id = ((w0 >> 8) & 0xFF) as u8;
+        let w1 = self.words[1];
+        let w2 = self.words[2];
+        let w3 = self.words[3];
+        let data = [
+            (w0 & 0xFF) as u8,
+            ((w1 >> 24) & 0xFF) as u8,
+            ((w1 >> 16) & 0xFF) as u8,
+            ((w1 >> 8) & 0xFF) as u8,
+            (w1 & 0xFF) as u8,
+            ((w2 >> 24) & 0xFF) as u8,
+            ((w2 >> 16) & 0xFF) as u8,
+            ((w2 >> 8) & 0xFF) as u8,
+            (w2 & 0xFF) as u8,
+            ((w3 >> 24) & 0xFF) as u8,
+            ((w3 >> 16) & 0xFF) as u8,
+            ((w3 >> 8) & 0xFF) as u8,
+            (w3 & 0xFF) as u8,
+        ];
+        Some((status, count, stream_id, data))
     }
 
     /// SysEx7: (status 0–3, valid byte count, payload). F0/F7 are not included.
@@ -232,6 +287,18 @@ mod tests {
         assert_eq!(msg.message_type(), 0x3);
         assert_eq!(msg.words()[0], 0x3004_7E7F);
         assert_eq!(msg.words()[1], 0x0601_0000);
+    }
+
+    #[test]
+    fn sysex8_complete_is_four_words_type_5() {
+        let msg = UmpMessage::sysex8(0, 0, 0xAB, &[0xF0, 0x01]);
+        assert_eq!(msg.len(), 4);
+        assert_eq!(msg.message_type(), 0x5);
+        assert_eq!(msg.words()[0], 0x5003_ABF0);
+        let mut data = [0u8; 13];
+        data[0] = 0xF0;
+        data[1] = 0x01;
+        assert_eq!(msg.sysex8_parts(), Some((0, 3, 0xAB, data)));
     }
 
     #[test]
