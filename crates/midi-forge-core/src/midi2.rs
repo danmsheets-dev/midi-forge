@@ -108,6 +108,28 @@ pub fn midi2_assignable_controller(
     UmpMessage::midi2_channel_voice(group, 0x30 | (channel & 0x0F), bank, index, value)
 }
 
+/// MIDI 2 Relative Registered Controller. `delta` is two’s-complement in word1.
+pub fn midi2_registered_controller_relative(
+    group: u8,
+    channel: u8,
+    bank: u8,
+    index: u8,
+    delta: i32,
+) -> UmpMessage {
+    UmpMessage::midi2_channel_voice(group, 0x40 | (channel & 0x0F), bank, index, delta as u32)
+}
+
+/// MIDI 2 Relative Assignable Controller. `delta` is two’s-complement in word1.
+pub fn midi2_assignable_controller_relative(
+    group: u8,
+    channel: u8,
+    bank: u8,
+    index: u8,
+    delta: i32,
+) -> UmpMessage {
+    UmpMessage::midi2_channel_voice(group, 0x50 | (channel & 0x0F), bank, index, delta as u32)
+}
+
 pub fn midi2_per_note_pitch_bend(group: u8, channel: u8, note: u8, value: u32) -> UmpMessage {
     UmpMessage::midi2_channel_voice(group, 0x60 | (channel & 0x0F), note, 0, value)
 }
@@ -389,5 +411,54 @@ mod tests {
         assert_eq!(value32_to_7(value7_to_32(0)), 0);
         assert_eq!(value32_to_7(value7_to_32(127)), 127);
         assert_eq!(value32_to_7(value7_to_32(64)), 64);
+    }
+
+    #[test]
+    fn registered_relative_decodes_and_drops_on_midi1() {
+        let m = midi2_registered_controller_relative(0, 3, 0, 6, -1);
+        assert_eq!(m.status_byte() & 0xF0, 0x40);
+        assert_eq!(crate::decode(&m).kind_key(), "m2_rc_rel");
+        assert!(downscale_to_midi1(&m).is_empty());
+        match crate::decode(&m) {
+            crate::Decoded::Midi2RegisteredControllerRelative {
+                group,
+                channel,
+                bank,
+                index,
+                delta,
+            } => {
+                assert_eq!(group, 0);
+                assert_eq!(channel, 3);
+                assert_eq!(bank, 0);
+                assert_eq!(index, 6);
+                assert_eq!(delta, -1);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(crate::decode(&m).summary(), "Ch4 M2 RC rel bank 0 idx 6 -1");
+        let ac = midi2_assignable_controller_relative(0, 1, 2, 3, 16);
+        assert_eq!(ac.status_byte() & 0xF0, 0x50);
+        assert_eq!(crate::decode(&ac).kind_key(), "m2_ac_rel");
+        assert!(downscale_to_midi1(&ac).is_empty());
+        match crate::decode(&ac) {
+            crate::Decoded::Midi2AssignableControllerRelative {
+                group,
+                channel,
+                bank,
+                index,
+                delta,
+            } => {
+                assert_eq!(group, 0);
+                assert_eq!(channel, 1);
+                assert_eq!(bank, 2);
+                assert_eq!(index, 3);
+                assert_eq!(delta, 16);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            crate::decode(&ac).summary(),
+            "Ch2 M2 AC rel bank 2 idx 3 16"
+        );
     }
 }

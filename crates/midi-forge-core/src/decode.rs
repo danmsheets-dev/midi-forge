@@ -129,6 +129,20 @@ pub enum Decoded {
         index: u8,
         value: u32,
     },
+    Midi2RegisteredControllerRelative {
+        group: u8,
+        channel: u8,
+        bank: u8,
+        index: u8,
+        delta: i32,
+    },
+    Midi2AssignableControllerRelative {
+        group: u8,
+        channel: u8,
+        bank: u8,
+        index: u8,
+        delta: i32,
+    },
     Midi2PerNotePitchBend {
         group: u8,
         channel: u8,
@@ -292,6 +306,26 @@ impl Decoded {
                 value,
                 ..
             } => format!("Ch{} M2 AC bank {bank} idx {index} {value}", channel + 1),
+            Self::Midi2RegisteredControllerRelative {
+                channel,
+                bank,
+                index,
+                delta,
+                ..
+            } => format!(
+                "Ch{} M2 RC rel bank {bank} idx {index} {delta}",
+                channel + 1
+            ),
+            Self::Midi2AssignableControllerRelative {
+                channel,
+                bank,
+                index,
+                delta,
+                ..
+            } => format!(
+                "Ch{} M2 AC rel bank {bank} idx {index} {delta}",
+                channel + 1
+            ),
             Self::Midi2PerNotePitchBend {
                 channel,
                 note,
@@ -355,6 +389,8 @@ impl Decoded {
             Self::Midi2PitchBend { .. } => "m2_pitch_bend",
             Self::Midi2RegisteredController { .. } => "m2_rc",
             Self::Midi2AssignableController { .. } => "m2_ac",
+            Self::Midi2RegisteredControllerRelative { .. } => "m2_rc_rel",
+            Self::Midi2AssignableControllerRelative { .. } => "m2_ac_rel",
             Self::Midi2PerNotePitchBend { .. } => "m2_pn_bend",
             Self::Midi2RegisteredPerNote { .. } => "m2_pn_rc",
             Self::Midi2AssignablePerNote { .. } => "m2_pn_ac",
@@ -537,6 +573,20 @@ fn decode_midi2_channel(msg: &UmpMessage) -> Decoded {
             bank: d1,
             index: msg.data2(),
             value: w1,
+        },
+        0x40 => Decoded::Midi2RegisteredControllerRelative {
+            group,
+            channel,
+            bank: d1,
+            index: msg.data2(),
+            delta: w1 as i32,
+        },
+        0x50 => Decoded::Midi2AssignableControllerRelative {
+            group,
+            channel,
+            bank: d1,
+            index: msg.data2(),
+            delta: w1 as i32,
         },
         0x60 => Decoded::Midi2PerNotePitchBend {
             group,
