@@ -5,9 +5,9 @@ use midi_forge_core::{
 };
 use midi_forge_io::{Direction, Endpoint};
 
-use crate::app::{MidiForgeApp, truncate};
+use crate::app::{EngineInner, truncate};
 
-pub fn thru_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+pub fn thru_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.horizontal(|ui| {
         ui.heading("Thru");
         ui.weak("Cables and matrix are the same graph. Maps run after filters.");
@@ -49,7 +49,7 @@ pub fn thru_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     });
 }
 
-fn patchbay(ui: &mut egui::Ui, app: &mut MidiForgeApp, inputs: &[Endpoint], outputs: &[Endpoint]) {
+fn patchbay(ui: &mut egui::Ui, app: &mut EngineInner, inputs: &[Endpoint], outputs: &[Endpoint]) {
     ui.label("Patchbay");
     if inputs.is_empty() || outputs.is_empty() {
         ui.weak("Need an input and an output.");
@@ -119,7 +119,7 @@ fn patchbay(ui: &mut egui::Ui, app: &mut MidiForgeApp, inputs: &[Endpoint], outp
     }
 }
 
-fn matrix(ui: &mut egui::Ui, app: &mut MidiForgeApp, inputs: &[Endpoint], outputs: &[Endpoint]) {
+fn matrix(ui: &mut egui::Ui, app: &mut EngineInner, inputs: &[Endpoint], outputs: &[Endpoint]) {
     ui.label("Matrix");
     if inputs.is_empty() || outputs.is_empty() {
         ui.label("Need at least one input and one output.");
@@ -156,7 +156,7 @@ fn matrix(ui: &mut egui::Ui, app: &mut MidiForgeApp, inputs: &[Endpoint], output
     });
 }
 
-fn filter_editor(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+fn filter_editor(ui: &mut egui::Ui, app: &mut EngineInner) {
     let Some((from, to)) = app.selected_link else {
         ui.weak("Select a thru cell to edit filter and maps.");
         return;
@@ -178,6 +178,7 @@ fn filter_editor(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         ui.checkbox(&mut filter.pitch_bend, "Bend");
         ui.checkbox(&mut filter.sysex, "SysEx");
         ui.checkbox(&mut filter.clock, "Clock");
+        ui.checkbox(&mut filter.per_note, "Per-note");
         ui.checkbox(&mut filter.transport, "Start/Stop");
         ui.checkbox(&mut filter.active_sensing, "Sensing");
         ui.checkbox(&mut filter.reset, "Reset");
@@ -219,7 +220,7 @@ fn filter_editor(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     app.router.set_filter(from, to, filter);
 }
 
-fn map_editor(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+fn map_editor(ui: &mut egui::Ui, app: &mut EngineInner) {
     let Some((from, to)) = app.selected_link else {
         return;
     };
@@ -372,6 +373,8 @@ fn value_map_editor(ui: &mut egui::Ui, row: usize, which: u8, value: &mut ValueM
         ValueMap::Constant(_) => "Const",
         ValueMap::Offset(_) => "Offset",
         ValueMap::Scale { .. } => "Scale",
+        ValueMap::Constant32(_) => "C32",
+        ValueMap::Scale32 { .. } => "S32",
     };
     egui::ComboBox::from_id_salt(("vmap", row, which))
         .selected_text(label)
@@ -407,6 +410,12 @@ fn value_map_editor(ui: &mut egui::Ui, row: usize, which: u8, value: &mut ValueM
                     invert: false,
                 };
             }
+            if ui
+                .selectable_label(matches!(value, ValueMap::Constant32(_)), "C32")
+                .clicked()
+            {
+                *value = ValueMap::Constant32(0);
+            }
         });
     match value {
         ValueMap::Keep => {}
@@ -429,10 +438,26 @@ fn value_map_editor(ui: &mut egui::Ui, row: usize, which: u8, value: &mut ValueM
             ui.add(egui::DragValue::new(out_max).range(0..=127));
             ui.checkbox(invert, "inv");
         }
+        ValueMap::Constant32(v) => {
+            ui.add(egui::DragValue::new(v));
+        }
+        ValueMap::Scale32 {
+            in_min,
+            in_max,
+            out_min,
+            out_max,
+            invert,
+        } => {
+            ui.add(egui::DragValue::new(in_min).prefix("in "));
+            ui.add(egui::DragValue::new(in_max));
+            ui.add(egui::DragValue::new(out_min).prefix("out "));
+            ui.add(egui::DragValue::new(out_max));
+            ui.checkbox(invert, "inv");
+        }
     }
 }
 
-fn link_title(app: &MidiForgeApp, from: PortId, to: PortId) -> String {
+fn link_title(app: &EngineInner, from: PortId, to: PortId) -> String {
     let from_name = app
         .port_names
         .get(&from)

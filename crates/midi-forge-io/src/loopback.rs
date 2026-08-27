@@ -64,13 +64,13 @@ impl SoftwareLoopbacks {
                 id: in_id(c.index),
                 name: format!("{} In", c.name),
                 direction: Direction::Input,
-                protocol: ProtocolHint::Midi1Bytes,
+                protocol: ProtocolHint::Ump,
             });
             eps.push(Endpoint {
                 id: out_id(c.index),
                 name: format!("{} Out", c.name),
                 direction: Direction::Output,
-                protocol: ProtocolHint::Midi1Bytes,
+                protocol: ProtocolHint::Ump,
             });
         }
         eps
@@ -137,6 +137,9 @@ impl SoftwareLoopbacks {
     }
 
     pub fn send_sysex(&mut self, id: &EndpointId, bytes: &[u8]) -> Result<(), IoError> {
+        if bytes.first() != Some(&0xF0) || bytes.last() != Some(&0xF7) {
+            return Err(IoError::UnsupportedPacket);
+        }
         let mut parser = Midi1Parser::new();
         let packets = parser.push_slice(bytes);
         for p in packets {
@@ -183,6 +186,17 @@ fn parse_index(id: &str) -> Option<u32> {
     num.parse().ok()
 }
 
+/// True when `a`/`b` are the two ends of the same in-app cable.
+pub fn is_loopback_pair(a: &str, b: &str) -> bool {
+    match (parse_index(a), parse_index(b)) {
+        (Some(x), Some(y)) if x == y => {
+            (a.ends_with(":in") && b.ends_with(":out"))
+                || (a.ends_with(":out") && b.ends_with(":in"))
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +215,36 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].port, PortId(9));
         assert_eq!(got[0].packet, note);
+        let eps = loops.endpoints();
+        assert!(eps.iter().all(|e| e.protocol == ProtocolHint::Ump));
+    }
+
+    #[test]
+    fn ump_midi2_roundtrip_without_downscale() {
+        let mut loops = SoftwareLoopbacks::new();
+        let (inp, outp) = loops.create("M2");
+        loops.open_input(&inp, PortId(3)).unwrap();
+        loops.open_output(&outp).unwrap();
+        let m2 = midi_forge_core::midi2_note_on(0, 1, 64, 0x8000);
+        loops.send(&outp, m2).unwrap();
+        let mut got = Vec::new();
+        loops.poll(&mut got);
+        assert_eq!(got[0].packet, m2);
+        assert_eq!(got[0].packet.message_type(), 0x4);
+    }
+
+    #[test]
+    fn send_sysex_rejects_unframed() {
+        let mut loops = SoftwareLoopbacks::new();
+        let (_inp, outp) = loops.create("X");
+        loops.open_output(&outp).unwrap();
+        assert!(loops.send_sysex(&outp, &[0x90, 60, 127]).is_err());
+    }
+
+    #[test]
+    fn pair_detects_same_cable() {
+        assert!(is_loopback_pair("forge:loop:2:in", "forge:loop:2:out"));
+        assert!(!is_loopback_pair("forge:loop:2:in", "forge:loop:3:out"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use eframe::egui;
 use midi_forge_core::UmpMessage;
 use midi_forge_io::{Direction, EndpointId};
 
-use crate::app::MidiForgeApp;
+use crate::app::EngineInner;
 
 const WHITE: [u8; 14] = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23];
 const BLACK_AT: [(usize, u8); 10] = [
@@ -20,7 +20,7 @@ const BLACK_AT: [(usize, u8); 10] = [
     (12, 22),
 ];
 
-pub fn inject_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+pub fn inject_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.horizontal(|ui| {
         ui.heading("Inject");
         ui.weak("Sends to the selected open output.");
@@ -31,6 +31,8 @@ pub fn inject_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         ui.add(egui::DragValue::new(&mut app.inject_octave).range(-2..=4));
         ui.label("Vel");
         ui.add(egui::DragValue::new(&mut app.inject_velocity).range(1..=127));
+        ui.checkbox(&mut app.inject_m2, "MIDI 2")
+            .on_hover_text("16-bit velocity / 32-bit CC on UMP outputs and loopbacks");
     });
 
     let outputs: Vec<(String, String)> = app
@@ -84,7 +86,7 @@ pub fn inject_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     });
 }
 
-fn piano(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+fn piano(ui: &mut egui::Ui, app: &mut EngineInner) {
     let white_w = 22.0;
     let white_h = 72.0;
     let black_w = 14.0;
@@ -158,22 +160,43 @@ fn piano(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     app.held_keys = pressed;
 }
 
-fn send_note(app: &mut MidiForgeApp, note: u8, on: bool) {
+fn send_note(app: &mut EngineInner, note: u8, on: bool) {
     let ch = app.inject_channel.saturating_sub(1).min(15);
-    let vel = if on { app.inject_velocity.min(127) } else { 0 };
-    let status = if on { 0x90 } else { 0x80 } | ch;
-    let packet = UmpMessage::midi1_channel_voice(0, status, note.min(127), vel);
+    let packet = if app.inject_m2 {
+        let vel = if on {
+            midi_forge_core::velocity7_to_16(app.inject_velocity.min(127))
+        } else {
+            0
+        };
+        if on {
+            midi_forge_core::midi2_note_on(0, ch, note.min(127), vel)
+        } else {
+            midi_forge_core::midi2_note_off(0, ch, note.min(127), vel)
+        }
+    } else {
+        let vel = if on { app.inject_velocity.min(127) } else { 0 };
+        let status = if on { 0x90 } else { 0x80 } | ch;
+        UmpMessage::midi1_channel_voice(0, status, note.min(127), vel)
+    };
     send_inject(app, packet);
 }
 
-fn send_cc(app: &mut MidiForgeApp, value: u8) {
+fn send_cc(app: &mut EngineInner, value: u8) {
     let ch = app.inject_channel.saturating_sub(1).min(15);
-    let packet =
-        UmpMessage::midi1_channel_voice(0, 0xB0 | ch, app.inject_cc.min(127), value.min(127));
+    let packet = if app.inject_m2 {
+        midi_forge_core::midi2_cc(
+            0,
+            ch,
+            app.inject_cc.min(127),
+            midi_forge_core::value7_to_32(value),
+        )
+    } else {
+        UmpMessage::midi1_channel_voice(0, 0xB0 | ch, app.inject_cc.min(127), value.min(127))
+    };
     send_inject(app, packet);
 }
 
-fn send_inject(app: &mut MidiForgeApp, packet: UmpMessage) {
+fn send_inject(app: &mut EngineInner, packet: UmpMessage) {
     let Some(dest) = app.inject_dest.clone() else {
         app.status = "Pick an inject output".into();
         return;

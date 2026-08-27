@@ -1,8 +1,8 @@
 use eframe::egui;
 
-use crate::app::MidiForgeApp;
+use crate::app::EngineInner;
 
-pub fn clock_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+pub fn clock_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.horizontal(|ui| {
         ui.heading("Clock");
         ui.weak("Host receive — not cable delay.");
@@ -10,6 +10,8 @@ pub fn clock_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
             app.clock.reset();
         }
     });
+    master_row(ui, app);
+    ui.separator();
     let runaway = app.clock.runaway();
     let summary = app.clock.summary();
     if runaway {
@@ -25,6 +27,84 @@ pub fn clock_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
             note_mean / 1_000_000,
             app.clock.notes.jitter_ns().unwrap_or(0) / 1000
         ));
+    }
+}
+
+fn master_row(ui: &mut egui::Ui, app: &mut EngineInner) {
+    ui.horizontal_wrapped(|ui| {
+        ui.strong("Master");
+        ui.checkbox(&mut app.master.enabled, "Enable")
+            .on_hover_text("Generate MIDI clock on the selected output (engine thread)");
+        let mut bpm = app.master.bpm;
+        if ui
+            .add(
+                egui::DragValue::new(&mut bpm)
+                    .range(20.0..=300.0)
+                    .prefix("BPM "),
+            )
+            .changed()
+        {
+            app.master.set_bpm(bpm);
+        }
+        let outputs: Vec<(String, String)> = app
+            .endpoints
+            .iter()
+            .filter(|e| e.direction == midi_forge_io::Direction::Output)
+            .map(|e| (e.id.0.clone(), e.name.clone()))
+            .collect();
+        if app.master_dest.is_none() {
+            app.master_dest = outputs.first().map(|(id, _)| id.clone());
+        }
+        let label = app
+            .master_dest
+            .as_ref()
+            .and_then(|id| {
+                outputs
+                    .iter()
+                    .find(|(oid, _)| oid == id)
+                    .map(|(_, n)| n.as_str())
+            })
+            .unwrap_or("(none)");
+        egui::ComboBox::from_id_salt("clock_master_dest")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                for (id, name) in &outputs {
+                    ui.selectable_value(&mut app.master_dest, Some(id.clone()), name);
+                }
+            });
+        if ui.button("Start").clicked() {
+            let start = app.master.start(app.host_ns());
+            send_master(app, start);
+        }
+        if ui.button("Continue").clicked() {
+            let pkt = app.master.cont(app.host_ns());
+            send_master(app, pkt);
+        }
+        if ui.button("Stop").clicked() {
+            let pkt = app.master.stop();
+            send_master(app, pkt);
+        }
+        if app.master.running() {
+            ui.colored_label(
+                egui::Color32::from_rgb(80, 180, 140),
+                format!("{} ticks", app.master.ticks),
+            );
+        }
+    });
+}
+
+fn send_master(app: &mut EngineInner, packet: midi_forge_core::UmpMessage) {
+    let Some(dest) = app.master_dest.clone() else {
+        app.status = "Pick a clock master output".into();
+        return;
+    };
+    let id = midi_forge_io::EndpointId(dest);
+    if let Err(err) = app.set_output_open(&id, true) {
+        app.port_errors.insert(id.0.clone(), err);
+        return;
+    }
+    if let Err(err) = app.send_packet(&id, &packet) {
+        app.status = format!("Clock master: {err}");
     }
 }
 
@@ -56,7 +136,7 @@ fn hist_row(ui: &mut egui::Ui, label: &str, bins: Vec<usize>) {
     });
 }
 
-pub fn route_panel(ui: &mut egui::Ui, app: &MidiForgeApp) {
+pub fn route_panel(ui: &mut egui::Ui, app: &EngineInner) {
     ui.horizontal(|ui| {
         ui.heading("Thru path");
         ui.weak("In → out. Fan-out is a split.");

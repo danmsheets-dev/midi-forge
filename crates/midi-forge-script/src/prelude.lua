@@ -44,6 +44,10 @@ function midi.cc(ch, cc, val, group)
   }
 end
 
+-- midi.after(ms, ev) schedules a later event (engine thread).
+-- midi.state is a persisted table (saved with the profile).
+-- function on_idle(now_ms) end  -- optional, ~1 ms
+
 function midi.pitch_bend(ch, lsb, msb, group)
   ch = chn(ch)
   return {

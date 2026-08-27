@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod cli;
 mod clock;
 mod inject;
 mod live;
@@ -12,10 +13,15 @@ mod thru;
 use midi_forge_io::{Direction, MidiBackend, default_backend};
 
 fn main() -> eframe::Result<()> {
-    if std::env::args().any(|a| a == "--list") {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--list") {
         attach_parent_console();
         list_ports();
         return Ok(());
+    }
+    if cli::dispatch(&args) {
+        attach_parent_console();
+        std::process::exit(cli::run(&args));
     }
 
     let options = eframe::NativeOptions {

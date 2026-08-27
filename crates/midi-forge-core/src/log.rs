@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use crate::event::MidiEvent;
 
 /// Bounded ring of captured events. Oldest entries are dropped when full.
+#[derive(Clone, Debug)]
 pub struct MonitorLog {
     events: VecDeque<MidiEvent>,
     capacity: usize,

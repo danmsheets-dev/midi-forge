@@ -26,9 +26,101 @@ pub fn profile_inquiry(source_muid: [u8; 4]) -> SysexDump {
     ci_frame(0x20, source_muid, &[0x7F])
 }
 
-/// Property Exchange Capability Inquiry.
+/// Property Exchange Capability Inquiry (v1.2: 1-byte simultaneous requests).
 pub fn pe_capability_inquiry(source_muid: [u8; 4]) -> SysexDump {
-    ci_frame(0x30, source_muid, &[])
+    ci_frame(0x30, source_muid, &[1])
+}
+
+fn u14(n: usize) -> [u8; 2] {
+    [(n & 0x7F) as u8, ((n >> 7) & 0x7F) as u8]
+}
+
+fn read_u14(b: &[u8]) -> Option<usize> {
+    Some(usize::from(*b.first()?) | (usize::from(*b.get(1)?) << 7))
+}
+
+/// MIDI-CI PE Get Property Data Inquiry (0x34).
+pub fn pe_get(source_muid: [u8; 4], request_id: u8, header: &str) -> SysexDump {
+    let hdr = header.as_bytes();
+    let mut rest = vec![request_id & 0x7F];
+    rest.extend_from_slice(&u14(hdr.len()));
+    rest.extend_from_slice(hdr);
+    ci_frame(0x34, source_muid, &rest)
+}
+
+/// MIDI-CI PE Set Property Data Inquiry (0x36).
+pub fn pe_set(source_muid: [u8; 4], request_id: u8, header: &str, body: &[u8]) -> SysexDump {
+    let hdr = header.as_bytes();
+    let mut rest = vec![request_id & 0x7F];
+    rest.extend_from_slice(&u14(hdr.len()));
+    rest.extend_from_slice(hdr);
+    rest.extend_from_slice(&u14(body.len()));
+    rest.extend_from_slice(body);
+    ci_frame(0x36, source_muid, &rest)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeData {
+    pub is_set: bool,
+    pub is_reply: bool,
+    pub source_muid: [u8; 4],
+    pub request_id: u8,
+    pub header: String,
+    pub body: Vec<u8>,
+}
+
+impl PeData {
+    pub fn summary(&self) -> String {
+        let kind = match (self.is_set, self.is_reply) {
+            (false, false) => "PE GET",
+            (false, true) => "PE GET reply",
+            (true, false) => "PE SET",
+            (true, true) => "PE SET reply",
+        };
+        format!(
+            "{kind} id {} {} ({} B)",
+            self.request_id,
+            self.header,
+            self.body.len()
+        )
+    }
+}
+
+pub fn parse_pe_data(dump: &SysexDump) -> Option<PeData> {
+    let (sub, source_muid, rest) = ci_parts(dump)?;
+    let (is_set, is_reply) = match sub {
+        0x34 => (false, false),
+        0x35 => (false, true),
+        0x36 => (true, false),
+        0x37 => (true, true),
+        _ => return None,
+    };
+    if rest.is_empty() {
+        return None;
+    }
+    let request_id = rest[0];
+    let hlen = read_u14(rest.get(1..3)?)?;
+    if rest.len() < 3 + hlen {
+        return None;
+    }
+    let header = String::from_utf8_lossy(&rest[3..3 + hlen]).into_owned();
+    let mut body = Vec::new();
+    let after = 3 + hlen;
+    if rest.len() >= after + 2 {
+        let blen = read_u14(&rest[after..after + 2])?;
+        let start = after + 2;
+        if rest.len() >= start + blen {
+            body = rest[start..start + blen].to_vec();
+        }
+    }
+    Some(PeData {
+        is_set,
+        is_reply,
+        source_muid,
+        request_id,
+        header,
+        body,
+    })
 }
 
 /// Midi-Forge default 28-bit MUID packed as 4×7-bit bytes.
@@ -109,16 +201,14 @@ impl CiProfileList {
 
 pub fn parse_ci_profiles(dump: &SysexDump) -> Option<CiProfileList> {
     let (sub, source_muid, rest) = ci_parts(dump)?;
-    if sub != 0x21 || rest.is_empty() {
+    if sub != 0x21 || rest.len() < 2 {
         return None;
     }
-    // dest channel, then enabled count + 5-byte ids, disabled count + ids
-    let mut i = 1usize;
-    if i >= rest.len() {
-        return None;
-    }
-    let n_en = rest[i] as usize;
-    i += 1;
+    // M2-101-UM Table 18: after dest MUID, 2-byte LSB-first enabled count, 5-byte IDs,
+    // then 2-byte disabled count. No extra dest-channel byte.
+    let mut i = 0usize;
+    let n_en = usize::from(rest[i]) | (usize::from(*rest.get(i + 1)?) << 7);
+    i += 2;
     if i + n_en * 5 > rest.len() {
         return None;
     }
@@ -129,15 +219,15 @@ pub fn parse_ci_profiles(dump: &SysexDump) -> Option<CiProfileList> {
         enabled.push(id);
         i += 5;
     }
-    if i >= rest.len() {
+    if i + 2 > rest.len() {
         return Some(CiProfileList {
             source_muid,
             enabled,
             disabled: Vec::new(),
         });
     }
-    let n_dis = rest[i] as usize;
-    i += 1;
+    let n_dis = usize::from(rest[i]) | (usize::from(rest[i + 1]) << 7);
+    i += 2;
     if i + n_dis * 5 > rest.len() {
         return None;
     }
@@ -203,6 +293,9 @@ pub fn parse_ci_note(dump: &SysexDump) -> Option<String> {
     if sub == 0x30 {
         return Some("CI PE capability inquiry".into());
     }
+    if let Some(pe) = parse_pe_data(dump) {
+        return Some(pe.summary());
+    }
     None
 }
 
@@ -237,6 +330,8 @@ mod tests {
     fn pe_and_profile_parse() {
         let pe_inq = pe_capability_inquiry(FORGE_MUID);
         assert!(parse_ci_note(&pe_inq).unwrap().contains("PE"));
+        let payload = pe_inq.payload();
+        assert_eq!(*payload.last().unwrap(), 1, "simultaneous-requests byte");
         let mut b = vec![0xF0, 0x7E, 0x7F, 0x0D, 0x31, 0x01];
         b.extend_from_slice(&FORGE_MUID);
         b.extend_from_slice(&[0x7F, 0x7F, 0x7F, 0x7F]);
@@ -249,10 +344,9 @@ mod tests {
         let mut p = vec![0xF0, 0x7E, 0x7F, 0x0D, 0x21, 0x01];
         p.extend_from_slice(&FORGE_MUID);
         p.extend_from_slice(&[0x7F, 0x7F, 0x7F, 0x7F]);
-        p.push(0x7F); // dest
-        p.push(1); // 1 enabled
-        p.extend_from_slice(&[0x21, 0x00, 0x01, 0x00, 0x01]); // MPE profile-ish
-        p.push(0); // 0 disabled
+        p.extend_from_slice(&[0x01, 0x00]); // 1 enabled, 14-bit LSB first
+        p.extend_from_slice(&[0x21, 0x00, 0x01, 0x00, 0x01]);
+        p.extend_from_slice(&[0x00, 0x00]); // 0 disabled
         p.push(0xF7);
         let list = parse_ci_profiles(&SysexDump::from_bytes(p).unwrap()).unwrap();
         assert_eq!(list.enabled.len(), 1);
@@ -262,5 +356,18 @@ mod tests {
                 .unwrap()
                 .contains("Profile")
         );
+    }
+
+    #[test]
+    fn pe_get_set_roundtrip() {
+        let get = pe_get(FORGE_MUID, 3, r#"{"resource":"DeviceInfo"}"#);
+        let parsed = parse_pe_data(&get).unwrap();
+        assert!(!parsed.is_set && !parsed.is_reply);
+        assert_eq!(parsed.request_id, 3);
+        assert!(parsed.header.contains("DeviceInfo"));
+        let set = pe_set(FORGE_MUID, 4, r#"{"resource":"X"}"#, b"hi");
+        let p2 = parse_pe_data(&set).unwrap();
+        assert!(p2.is_set);
+        assert_eq!(p2.body, b"hi");
     }
 }

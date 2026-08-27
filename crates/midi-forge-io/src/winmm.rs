@@ -19,10 +19,12 @@ use crate::loopback::SoftwareLoopbacks;
 const MAXPNAMELEN: usize = 32;
 const MMSYSERR_NOERROR: u32 = 0;
 const MMSYSERR_ALLOCATED: u32 = 4;
+const MIDIERR_STILLPLAYING: u32 = 65;
 const CALLBACK_NULL: u32 = 0;
 const CALLBACK_FUNCTION: u32 = 0x0003_0000;
 const MIM_DATA: u32 = 0x3C3;
 const MIM_LONGDATA: u32 = 0x3C4;
+const MIM_LONGERROR: u32 = 0x3C6;
 const SYSEX_BUFFERS: usize = 8;
 const SYSEX_CAP: usize = 16 * 1024;
 const QUEUE_CAP: usize = 4096;
@@ -129,9 +131,12 @@ struct CaptureFrame {
     kind: FrameKind,
 }
 
+const SYSEX_CHUNK: usize = 256;
+
+#[derive(Clone, Copy)]
 enum FrameKind {
     Short(u32),
-    SysEx(Vec<u8>),
+    SysEx { len: u16, data: [u8; SYSEX_CHUNK] },
 }
 
 struct InputShared {
@@ -149,6 +154,8 @@ struct PreparedSysex {
 struct OpenInput {
     handle: usize,
     shared: Arc<InputShared>,
+    /// Extra Arc clone given to WinMM as dwInstance (`Arc::into_raw`).
+    instance: usize,
     _buffers: Vec<PreparedSysex>,
 }
 
@@ -237,16 +244,20 @@ impl MidiBackend for WinMmBackend {
         });
 
         let mut handle = 0usize;
+        let instance = Arc::into_raw(Arc::clone(&shared)) as usize;
         let rc = unsafe {
             midiInOpen(
                 &mut handle,
                 device_id,
                 midi_in_callback as *const () as usize,
-                Arc::as_ptr(&shared) as usize,
+                instance,
                 CALLBACK_FUNCTION,
             )
         };
         if rc != MMSYSERR_NOERROR {
+            unsafe {
+                drop(Arc::from_raw(instance as *const InputShared));
+            }
             return Err(mm_error(rc, &id.0));
         }
 
@@ -255,17 +266,9 @@ impl MidiBackend for WinMmBackend {
             match prepare_sysex(handle) {
                 Ok(buf) => buffers.push(buf),
                 Err(err) => {
-                    shared.live.store(false, Ordering::Release);
+                    shutdown_input(handle, &shared, &mut buffers);
                     unsafe {
-                        midiInReset(handle);
-                        for buf in &mut buffers {
-                            midiInUnprepareHeader(
-                                handle,
-                                buf.hdr.as_mut(),
-                                size_of::<MidiHdr>() as u32,
-                            );
-                        }
-                        midiInClose(handle);
+                        drop(Arc::from_raw(instance as *const InputShared));
                     }
                     return Err(err);
                 }
@@ -274,13 +277,9 @@ impl MidiBackend for WinMmBackend {
 
         let rc = unsafe { midiInStart(handle) };
         if rc != MMSYSERR_NOERROR {
-            shared.live.store(false, Ordering::Release);
+            shutdown_input(handle, &shared, &mut buffers);
             unsafe {
-                midiInReset(handle);
-                for buf in &mut buffers {
-                    midiInUnprepareHeader(handle, buf.hdr.as_mut(), size_of::<MidiHdr>() as u32);
-                }
-                midiInClose(handle);
+                drop(Arc::from_raw(instance as *const InputShared));
             }
             return Err(mm_error(rc, &format!("midiInStart {}", id.0)));
         }
@@ -291,6 +290,7 @@ impl MidiBackend for WinMmBackend {
             OpenInput {
                 handle,
                 shared,
+                instance,
                 _buffers: buffers,
             },
         );
@@ -304,14 +304,9 @@ impl MidiBackend for WinMmBackend {
         let Some(mut input) = self.inputs.remove(&id.0) else {
             return Ok(());
         };
-        input.shared.live.store(false, Ordering::Release);
+        shutdown_input(input.handle, &input.shared, &mut input._buffers);
         unsafe {
-            midiInStop(input.handle);
-            midiInReset(input.handle);
-            for buf in &mut input._buffers {
-                midiInUnprepareHeader(input.handle, buf.hdr.as_mut(), size_of::<MidiHdr>() as u32);
-            }
-            midiInClose(input.handle);
+            drop(Arc::from_raw(input.instance as *const InputShared));
         }
         self.parsers.remove(&input.shared.port);
         Ok(())
@@ -357,9 +352,10 @@ impl MidiBackend for WinMmBackend {
                         ump_from_packed_short(packed),
                     ));
                 }
-                FrameKind::SysEx(buf) => {
+                FrameKind::SysEx { len, data } => {
                     let parser = self.parsers.entry(frame.port).or_default();
-                    let packets = parser.push_slice(&buf);
+                    let n = usize::from(len).min(SYSEX_CHUNK);
+                    let packets = parser.push_slice(&data[..n]);
                     for packet in packets {
                         out.push(MidiEvent::new(time, frame.port, packet));
                     }
@@ -411,7 +407,20 @@ impl MidiBackend for WinMmBackend {
         self.loopbacks.remove(id)?;
         self.rebuild_endpoints()
     }
+
+    fn caps(&self) -> crate::backend::BackendCaps {
+        crate::backend::BackendCaps {
+            native_ump: false,
+            scheduled_send: false,
+            daw_visible_virtual: false,
+            multi_client: midisrv_running(),
+        }
+    }
 }
+
+// MidiHdr contains raw pointers; access is serialized by the engine mutex.
+unsafe impl Send for PreparedSysex {}
+unsafe impl Send for WinMmBackend {}
 
 impl WinMmBackend {
     fn rebuild_endpoints(&mut self) -> Result<(), IoError> {
@@ -434,9 +443,7 @@ fn send_long_message(handle: usize, bytes: &[u8]) -> Result<(), IoError> {
     }
     let rc = unsafe { midiOutLongMsg(handle, hdr.as_mut(), hdr_size) };
     if rc != MMSYSERR_NOERROR {
-        unsafe {
-            midiOutUnprepareHeader(handle, hdr.as_mut(), hdr_size);
-        }
+        let _ = wait_unprepare_out(handle, hdr.as_mut(), hdr_size);
         return Err(mm_error(rc, "midiOutLongMsg"));
     }
     let deadline = Instant::now() + sysex_send_timeout(bytes.len());
@@ -444,14 +451,29 @@ fn send_long_message(handle: usize, bytes: &[u8]) -> Result<(), IoError> {
         if Instant::now() > deadline {
             unsafe {
                 midiOutReset(handle);
-                midiOutUnprepareHeader(handle, hdr.as_mut(), hdr_size);
+            }
+            let done_deadline = Instant::now() + Duration::from_millis(250);
+            while hdr.flags & MHDR_DONE == 0 && Instant::now() < done_deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let rc = wait_unprepare_out(handle, hdr.as_mut(), hdr_size);
+            if rc == MIDIERR_STILLPLAYING {
+                std::mem::forget(data);
+                std::mem::forget(hdr);
+                return Err(IoError::Backend(
+                    "SysEx send timed out; buffer leaked until driver releases it".into(),
+                ));
             }
             return Err(IoError::Backend("SysEx send timed out".into()));
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    let rc = unsafe { midiOutUnprepareHeader(handle, hdr.as_mut(), hdr_size) };
+    let rc = wait_unprepare_out(handle, hdr.as_mut(), hdr_size);
     if rc != MMSYSERR_NOERROR {
+        if rc == MIDIERR_STILLPLAYING {
+            std::mem::forget(data);
+            std::mem::forget(hdr);
+        }
         return Err(mm_error(rc, "midiOutUnprepareHeader"));
     }
     Ok(())
@@ -476,6 +498,53 @@ fn prepare_sysex(handle: usize) -> Result<PreparedSysex, IoError> {
     Ok(PreparedSysex { hdr, _data: data })
 }
 
+fn shutdown_input(handle: usize, shared: &InputShared, buffers: &mut [PreparedSysex]) {
+    shared.live.store(false, Ordering::Release);
+    unsafe {
+        midiInStop(handle);
+        midiInReset(handle);
+    }
+    // Let in-flight CALLBACK_FUNCTION calls observe live=false before we unprepare.
+    std::thread::sleep(Duration::from_millis(2));
+    let hdr_size = size_of::<MidiHdr>() as u32;
+    for buf in buffers.iter_mut() {
+        let _ = wait_unprepare_in(handle, buf.hdr.as_mut(), hdr_size);
+    }
+    wait_close_in(handle);
+}
+
+fn wait_unprepare_in(handle: usize, hdr: *mut MidiHdr, hdr_size: u32) -> u32 {
+    for _ in 0..250 {
+        let rc = unsafe { midiInUnprepareHeader(handle, hdr, hdr_size) };
+        if rc != MIDIERR_STILLPLAYING {
+            return rc;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    MIDIERR_STILLPLAYING
+}
+
+fn wait_close_in(handle: usize) {
+    for _ in 0..250 {
+        let rc = unsafe { midiInClose(handle) };
+        if rc != MIDIERR_STILLPLAYING {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn wait_unprepare_out(handle: usize, hdr: *mut MidiHdr, hdr_size: u32) -> u32 {
+    for _ in 0..250 {
+        let rc = unsafe { midiOutUnprepareHeader(handle, hdr, hdr_size) };
+        if rc != MIDIERR_STILLPLAYING {
+            return rc;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    MIDIERR_STILLPLAYING
+}
+
 unsafe extern "system" fn midi_in_callback(
     handle: usize,
     msg: u32,
@@ -488,7 +557,7 @@ unsafe extern "system" fn midi_in_callback(
     }
     let shared = unsafe { &*(instance as *const InputShared) };
     match msg {
-        MIM_DATA => {
+        MIM_DATA if shared.live.load(Ordering::Acquire) => {
             push_frame(
                 shared,
                 CaptureFrame {
@@ -498,22 +567,31 @@ unsafe extern "system" fn midi_in_callback(
                 },
             );
         }
-        MIM_LONGDATA if param1 != 0 => {
-            let hdr = unsafe { &*(param1 as *const MidiHdr) };
-            let len = (hdr.bytes_recorded as usize).min(SYSEX_CAP);
-            if !hdr.lp_data.is_null() && len > 0 {
-                let mut buf = vec![0u8; len];
-                unsafe {
-                    buf.copy_from_slice(std::slice::from_raw_parts(hdr.lp_data, len));
+        MIM_LONGDATA | MIM_LONGERROR if param1 != 0 => {
+            if msg == MIM_LONGDATA && shared.live.load(Ordering::Acquire) {
+                let hdr = unsafe { &*(param1 as *const MidiHdr) };
+                let total = (hdr.bytes_recorded as usize).min(SYSEX_CAP);
+                if !hdr.lp_data.is_null() && total > 0 {
+                    let src = unsafe { std::slice::from_raw_parts(hdr.lp_data, total) };
+                    let mut offset = 0;
+                    while offset < src.len() {
+                        let mut data = [0u8; SYSEX_CHUNK];
+                        let n = (src.len() - offset).min(SYSEX_CHUNK);
+                        data[..n].copy_from_slice(&src[offset..offset + n]);
+                        push_frame(
+                            shared,
+                            CaptureFrame {
+                                time_ms: param2 as u32,
+                                port: shared.port,
+                                kind: FrameKind::SysEx {
+                                    len: n as u16,
+                                    data,
+                                },
+                            },
+                        );
+                        offset += n;
+                    }
                 }
-                push_frame(
-                    shared,
-                    CaptureFrame {
-                        time_ms: param2 as u32,
-                        port: shared.port,
-                        kind: FrameKind::SysEx(buf),
-                    },
-                );
             }
             if shared.live.load(Ordering::Acquire) {
                 unsafe {
@@ -660,6 +738,12 @@ unsafe extern "system" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stillplaying_is_midierr_base_plus_one() {
+        assert_eq!(MIDIERR_STILLPLAYING, 65);
+        assert_eq!(MIM_LONGERROR, 0x3C6);
+    }
 
     #[test]
     fn midihdr_layout_is_120_bytes() {

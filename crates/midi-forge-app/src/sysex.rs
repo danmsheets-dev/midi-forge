@@ -2,13 +2,13 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use midi_forge_core::{
-    FORGE_MUID, SysexAssembler, SysexDump, discovery_inquiry, dump_packs, dumps_from_hex,
-    dumps_from_syx, dumps_to_syx, hex_diff, pack_dump, parse_ci_note, parse_identity_reply,
-    pe_capability_inquiry, profile_inquiry,
+    FORGE_MUID, SysexAssembler, SysexDump, apply_device, device_library, discovery_inquiry,
+    dump_packs, dumps_from_hex, dumps_from_syx, dumps_to_syx, hex_diff, pack_dump, parse_ci_note,
+    parse_identity_reply, pe_capability_inquiry, pe_get, pe_set, profile_inquiry,
 };
 use midi_forge_io::{Direction, EndpointId};
 
-use crate::app::MidiForgeApp;
+use crate::app::EngineInner;
 
 pub enum SendJob {
     Idle,
@@ -96,7 +96,7 @@ impl Librarian {
     }
 }
 
-pub fn librarian_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+pub fn librarian_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.heading("SysEx");
     ui.weak(
         "Arm receive, then dump from hardware. Handshake waits for an F7 before the next dump.",
@@ -194,6 +194,16 @@ pub fn librarian_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         {
             send_ci(app, pe_capability_inquiry(FORGE_MUID), "CI PE inquiry sent");
         }
+        if ui.button("PE GET").clicked() {
+            send_ci(app, pe_get(FORGE_MUID, 1, &app.pe_header), "PE GET sent");
+        }
+        if ui.button("PE SET").clicked() {
+            send_ci(
+                app,
+                pe_set(FORGE_MUID, 2, &app.pe_header, app.pe_body.as_bytes()),
+                "PE SET sent",
+            );
+        }
         if ui.button("Load .syx").clicked() {
             load_syx(app);
         }
@@ -223,6 +233,56 @@ pub fn librarian_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
             }
         }
     });
+    ui.horizontal(|ui| {
+        ui.label("Device");
+        let devices = device_library();
+        if app.device_idx >= devices.len() {
+            app.device_idx = 0;
+        }
+        let dlabel = devices.get(app.device_idx).map(|d| d.name).unwrap_or("—");
+        egui::ComboBox::from_id_salt("device_lib")
+            .selected_text(dlabel)
+            .width(160.0)
+            .show_ui(ui, |ui| {
+                for (i, d) in devices.iter().enumerate() {
+                    ui.selectable_value(&mut app.device_idx, i, d.name);
+                }
+            });
+        if ui
+            .small_button("Apply device")
+            .on_hover_text("Set delay, handshake, and queue that maker's dump pack")
+            .clicked()
+            && let Some(d) = devices.get(app.device_idx)
+        {
+            let (delay, handshake, dump) = apply_device(d);
+            app.librarian.delay_ms = delay;
+            app.librarian.handshake = handshake;
+            app.librarian.hex_edit = dump.to_hex();
+            if let Some((i, _)) = dump_packs()
+                .iter()
+                .enumerate()
+                .find(|(_, p)| p.name == d.pack_name)
+            {
+                app.pack_idx = i;
+            }
+            app.status = format!("{}: delay {} ms", d.name, delay);
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("PE hdr");
+        ui.add(
+            egui::TextEdit::singleline(&mut app.pe_header)
+                .desired_width(200.0)
+                .hint_text("{\"resource\":\"DeviceInfo\"}"),
+        );
+    });
+    ui.horizontal(|ui| {
+        ui.label("PE body");
+        ui.add(egui::TextEdit::singleline(&mut app.pe_body).desired_width(200.0));
+    });
+    if !app.pe_note.is_empty() {
+        ui.weak(&app.pe_note);
+    }
     if !app.librarian.identity_note.is_empty() {
         ui.weak(&app.librarian.identity_note);
     }
@@ -340,7 +400,7 @@ pub fn librarian_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     }
 }
 
-pub fn tick_send(app: &mut MidiForgeApp, ctx: &egui::Context) {
+pub fn tick_send(app: &mut EngineInner, ctx: &egui::Context) {
     tick_wizard(app, ctx);
     let job = std::mem::replace(&mut app.librarian.send_job, SendJob::Idle);
     match job {
@@ -404,7 +464,7 @@ pub fn tick_send(app: &mut MidiForgeApp, ctx: &egui::Context) {
 }
 
 fn send_one(
-    app: &mut MidiForgeApp,
+    app: &mut EngineInner,
     ctx: &egui::Context,
     dest: String,
     dumps: Vec<Vec<u8>>,
@@ -445,7 +505,7 @@ fn send_one(
 }
 
 fn advance_send(
-    app: &mut MidiForgeApp,
+    app: &mut EngineInner,
     ctx: &egui::Context,
     dest: String,
     dumps: Vec<Vec<u8>>,
@@ -469,7 +529,7 @@ fn advance_send(
     ctx.request_repaint_after(wait.max(Duration::from_millis(16)));
 }
 
-fn tick_wizard(app: &mut MidiForgeApp, ctx: &egui::Context) {
+fn tick_wizard(app: &mut EngineInner, ctx: &egui::Context) {
     let Wizard::Identify {
         dest,
         deadline,
@@ -510,7 +570,7 @@ fn tick_wizard(app: &mut MidiForgeApp, ctx: &egui::Context) {
     }
 }
 
-fn start_wizard(app: &mut MidiForgeApp) {
+fn start_wizard(app: &mut EngineInner) {
     let Some(dest) = app.librarian.dest.clone() else {
         app.status = "Pick a SysEx output".into();
         return;
@@ -536,7 +596,7 @@ fn start_wizard(app: &mut MidiForgeApp) {
     }
 }
 
-fn midi_ci_discovery(app: &mut MidiForgeApp) {
+fn midi_ci_discovery(app: &mut EngineInner) {
     send_ci(
         app,
         discovery_inquiry(FORGE_MUID),
@@ -544,7 +604,7 @@ fn midi_ci_discovery(app: &mut MidiForgeApp) {
     );
 }
 
-fn send_ci(app: &mut MidiForgeApp, dump: SysexDump, ok: &str) {
+fn send_ci(app: &mut EngineInner, dump: SysexDump, ok: &str) {
     let Some(dest) = app.librarian.dest.clone() else {
         app.status = "Pick a SysEx output".into();
         return;
@@ -561,7 +621,7 @@ fn send_ci(app: &mut MidiForgeApp, dump: SysexDump, ok: &str) {
     }
 }
 
-fn identity_request(app: &mut MidiForgeApp) {
+fn identity_request(app: &mut EngineInner) {
     let Some(dest) = app.librarian.dest.clone() else {
         app.status = "Pick a SysEx output".into();
         return;
@@ -578,7 +638,7 @@ fn identity_request(app: &mut MidiForgeApp) {
     }
 }
 
-fn queue_send(app: &mut MidiForgeApp, dumps: Vec<SysexDump>) {
+fn queue_send(app: &mut EngineInner, dumps: Vec<SysexDump>) {
     if dumps.is_empty() {
         app.status = "Nothing to send".into();
         return;
@@ -604,7 +664,7 @@ fn queue_send(app: &mut MidiForgeApp, dumps: Vec<SysexDump>) {
     };
 }
 
-fn load_syx(app: &mut MidiForgeApp) {
+fn load_syx(app: &mut EngineInner) {
     let Some(path) = rfd::FileDialog::new()
         .add_filter("SysEx", &["syx", "SYX"])
         .add_filter("Hex", &["txt", "hex"])
@@ -638,7 +698,7 @@ fn load_syx(app: &mut MidiForgeApp) {
     }
 }
 
-fn save_syx(app: &mut MidiForgeApp) {
+fn save_syx(app: &mut EngineInner) {
     let dumps = if let Some(i) = app.librarian.selected {
         vec![app.librarian.dumps[i].clone()]
     } else {

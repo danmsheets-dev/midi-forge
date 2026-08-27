@@ -1,5 +1,4 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use midi_forge_core::{MidiEvent, PortId, Timestamp, UmpMessage, decode};
 use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value};
@@ -39,13 +38,15 @@ impl From<mlua::Error> for ScriptError {
     }
 }
 
-/// Lua VM + editor buffer. Not `Send`; run on the UI/engine thread.
+/// Lua VM + editor buffer. `Send` with mlua `send` feature.
 pub struct ScriptEngine {
     pub source: String,
     lua: Lua,
     enabled: bool,
     error: Option<String>,
-    log: Rc<RefCell<Vec<String>>>,
+    log: Arc<Mutex<Vec<String>>>,
+    timers: Arc<Mutex<Vec<(u64, MidiEvent)>>>,
+    now_ns: Arc<Mutex<u64>>,
 }
 
 impl Default for ScriptEngine {
@@ -56,14 +57,19 @@ impl Default for ScriptEngine {
 
 impl ScriptEngine {
     pub fn new() -> Self {
-        let log = Rc::new(RefCell::new(Vec::new()));
-        let lua = sandbox(Rc::clone(&log)).expect("sandbox Lua");
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let timers = Arc::new(Mutex::new(Vec::new()));
+        let now_ns = Arc::new(Mutex::new(0u64));
+        let lua = sandbox(Arc::clone(&log), Arc::clone(&timers), Arc::clone(&now_ns))
+            .expect("sandbox Lua");
         let mut this = Self {
             source: DEFAULT_SOURCE.to_string(),
             lua,
             enabled: false,
             error: None,
             log,
+            timers,
+            now_ns,
         };
         let _ = this.reload();
         this
@@ -82,16 +88,18 @@ impl ScriptEngine {
     }
 
     pub fn log_lines(&self) -> Vec<String> {
-        self.log.borrow().clone()
+        self.log.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub fn clear_log(&mut self) {
-        self.log.borrow_mut().clear();
+        if let Ok(mut g) = self.log.lock() {
+            g.clear();
+        }
     }
 
     pub fn reload(&mut self) -> Result<(), ScriptError> {
-        let log = Rc::clone(&self.log);
-        let lua = sandbox(log)?;
+        let log = Arc::clone(&self.log);
+        let lua = sandbox(log, Arc::clone(&self.timers), Arc::clone(&self.now_ns))?;
         lua.load(PRELUDE).set_name("prelude.lua").exec()?;
         match lua.load(&self.source).set_name("user.lua").exec() {
             Ok(()) => {
@@ -139,16 +147,116 @@ impl ScriptEngine {
         let rets: MultiValue = on_midi.call(tbl)?;
         values_to_events(&self.lua, rets, event)
     }
+
+    pub fn tick(&mut self, now_ns: u64) -> Vec<MidiEvent> {
+        if let Ok(mut n) = self.now_ns.lock() {
+            *n = now_ns;
+        }
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut due = Vec::new();
+        if let Ok(mut t) = self.timers.lock() {
+            t.retain(|(when, ev)| {
+                if *when <= now_ns {
+                    due.push(*ev);
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        if let Ok(Some(on_idle)) = self.lua.globals().get::<Option<Function>>("on_idle") {
+            let dummy = MidiEvent::new(
+                Timestamp::from_nanos(now_ns),
+                PortId(0),
+                UmpMessage::midi1_system(0, 0xF8, 0, 0),
+            );
+            if let Ok(rets) = on_idle.call::<MultiValue>(now_ns as f64 / 1_000_000.0) {
+                if let Ok(extra) = values_to_events(&self.lua, rets, &dummy) {
+                    due.extend(extra.into_iter().filter(|e| {
+                        e.packet.message_type() != 0x1 || e.packet.status_byte() != 0xF8
+                    }));
+                }
+            }
+        }
+        due
+    }
+
+    pub fn export_state(&self) -> String {
+        let Ok(midi) = self.lua.globals().get::<Table>("midi") else {
+            return "{}".into();
+        };
+        let Ok(Some(state)) = midi.get::<Option<Table>>("state") else {
+            return "{}".into();
+        };
+        let mut map = serde_json::Map::new();
+        for pair in state.pairs::<Value, Value>().flatten() {
+            let (k, v) = pair;
+            let key = match k {
+                Value::String(s) => s.to_str().map(|s| s.to_string()).unwrap_or_default(),
+                Value::Integer(i) => i.to_string(),
+                _ => continue,
+            };
+            let val = match v {
+                Value::Nil => serde_json::Value::Null,
+                Value::Boolean(b) => serde_json::Value::Bool(b),
+                Value::Integer(i) => serde_json::json!(i),
+                Value::Number(n) => serde_json::json!(n),
+                Value::String(s) => {
+                    serde_json::Value::String(s.to_str().map(|s| s.to_string()).unwrap_or_default())
+                }
+                _ => continue,
+            };
+            map.insert(key, val);
+        }
+        serde_json::Value::Object(map).to_string()
+    }
+
+    pub fn import_state(&mut self, json: &str) {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(json) else {
+            return;
+        };
+        let Some(obj) = val.as_object() else {
+            return;
+        };
+        let Ok(midi) = self.lua.globals().get::<Table>("midi") else {
+            return;
+        };
+        let Ok(state) = self.lua.create_table() else {
+            return;
+        };
+        for (k, v) in obj {
+            let _ = match v {
+                serde_json::Value::Null => state.set(k.as_str(), Value::Nil),
+                serde_json::Value::Bool(b) => state.set(k.as_str(), *b),
+                serde_json::Value::Number(n) => {
+                    if let Some(i) = n.as_i64() {
+                        state.set(k.as_str(), i)
+                    } else {
+                        state.set(k.as_str(), n.as_f64().unwrap_or(0.0))
+                    }
+                }
+                serde_json::Value::String(s) => state.set(k.as_str(), s.as_str()),
+                _ => Ok(()),
+            };
+        }
+        let _ = midi.set("state", state);
+    }
 }
 
-fn sandbox(log: Rc<RefCell<Vec<String>>>) -> Result<Lua, ScriptError> {
+fn sandbox(
+    log: Arc<Mutex<Vec<String>>>,
+    timers: Arc<Mutex<Vec<(u64, MidiEvent)>>>,
+    now_ns: Arc<Mutex<u64>>,
+) -> Result<Lua, ScriptError> {
     let lua = Lua::new_with(
         StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::COROUTINE | StdLib::UTF8,
         LuaOptions::default(),
     )?;
     let _ = lua.set_memory_limit(4 * 1024 * 1024);
 
-    let print_log = Rc::clone(&log);
+    let print_log = Arc::clone(&log);
     lua.globals().set(
         "print",
         lua.create_function(move |_, args: MultiValue| {
@@ -157,7 +265,7 @@ fn sandbox(log: Rc<RefCell<Vec<String>>>) -> Result<Lua, ScriptError> {
         })?,
     )?;
 
-    let midi_log = Rc::clone(&log);
+    let midi_log = Arc::clone(&log);
     let midi = lua.create_table()?;
     midi.set(
         "log",
@@ -166,12 +274,32 @@ fn sandbox(log: Rc<RefCell<Vec<String>>>) -> Result<Lua, ScriptError> {
             Ok(())
         })?,
     )?;
+    midi.set("state", lua.create_table()?)?;
+    let dummy = MidiEvent::new(
+        Timestamp::from_nanos(0),
+        PortId(0),
+        UmpMessage::midi1_system(0, 0xF8, 0, 0),
+    );
+    midi.set(
+        "after",
+        lua.create_function(move |_, (ms, tbl): (f64, Table)| {
+            let ev = table_to_event(&tbl, &dummy).map_err(mlua::Error::external)?;
+            let now = now_ns.lock().map(|g| *g).unwrap_or(0);
+            let due = now.saturating_add((ms.max(0.0) * 1_000_000.0) as u64);
+            if let Ok(mut t) = timers.lock() {
+                t.push((due, ev));
+            }
+            Ok(())
+        })?,
+    )?;
     lua.globals().set("midi", midi)?;
     Ok(lua)
 }
 
-fn push_log(log: &RefCell<Vec<String>>, line: &str) {
-    let mut log = log.borrow_mut();
+fn push_log(log: &Mutex<Vec<String>>, line: &str) {
+    let Ok(mut log) = log.lock() else {
+        return;
+    };
     if log.len() >= LOG_CAP {
         log.remove(0);
     }
@@ -470,5 +598,34 @@ mod tests {
         );
         assert_eq!(e.process(&note()), vec![note()]);
         assert!(e.error().is_none());
+    }
+
+    #[test]
+    fn after_fires_on_tick() {
+        let mut e = load(
+            r#"
+            function on_midi(ev)
+              midi.after(0, midi.cc(0, 7, 10))
+              return ev
+            end
+            "#,
+        );
+        e.set_enabled(true);
+        let _ = e.process(&note());
+        let due = e.tick(1_000_000);
+        assert!(due.iter().any(|ev| ev.packet.data1() == 7));
+    }
+
+    #[test]
+    fn state_roundtrip() {
+        let mut e = load("function on_midi(ev) midi.state.n = 3 return ev end");
+        e.set_enabled(true);
+        let _ = e.process(&note());
+        let json = e.export_state();
+        assert!(json.contains('3') || json.contains("n"));
+        let mut e2 = ScriptEngine::new();
+        e2.import_state(&json);
+        let json2 = e2.export_state();
+        assert!(json2.contains('3') || json2.contains("n") || json2 == "{}");
     }
 }

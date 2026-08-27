@@ -1,9 +1,9 @@
 use eframe::egui;
 use midi_forge_core::cc_label;
 
-use crate::app::MidiForgeApp;
+use crate::app::EngineInner;
 
-pub fn live_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+pub fn live_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.horizontal(|ui| {
         ui.heading("Live");
         ui.weak("Now — not the log. Notes / last CC / bend per channel.");

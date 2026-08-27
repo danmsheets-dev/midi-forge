@@ -11,6 +11,10 @@ Requires stable Rust (see `rust-toolchain.toml`).
 ```text
 cargo test --workspace
 cargo run -p midi-forge-app -- --list
+cargo run -p midi-forge-app -- help
+cargo run -p midi-forge-app -- send --out "GS Wavetable" note 60 100
+cargo run -p midi-forge-app -- receive --in "MPK" --seconds 3
+cargo run -p midi-forge-app -- clock --out "GS Wavetable" --bpm 120 --seconds 2
 cargo run -p midi-forge-app
 ```
 
@@ -30,7 +34,13 @@ Lua: the right panel **Lua** tab. **Apply** compiles, **Enable** runs `on_midi` 
 
 **Live** is a ShowMIDI-style “now” view (notes sounding, last CC, bend per channel) above the monitor. Named CCs appear in the log (`CC7 (Volume)`); RPN/NRPN assemble from CC 98–101. **MIDI-CI** next to Identity sends a Discovery inquiry. Endpoints show whether MidiSrv / `midi.exe` are present — native UMP `MidiSession` still needs the Windows MIDI Services App SDK.
 
-**Clock** shows host-receive BPM, jitter, runaway clock, song position, and MTC. Histograms are USB/driver timing, not 5-pin delay. **Thru path** lists which outputs a note actually hit. **Snap** copies live + clock + stuck notes + recent thru. **Learn** on a thru map waits for the next CC/note. Exclusive-open errors name likely DAWs from window titles. **On top** + a larger **PANIC** are for the live bench.
+**Clock** shows host-receive BPM, jitter, runaway clock, song position, and MTC. **Master** (Enable + BPM + Start/Stop/Continue) generates F8/FA/FB/FC on a chosen output from the `midi-engine` thread. Histograms are USB/driver timing, not 5-pin delay. **Thru path** lists which outputs a note actually hit. **Snap** copies live + clock + stuck notes + recent thru. **Learn** on a thru map waits for the next CC/note. Exclusive-open errors name likely DAWs from window titles. **On top** + a larger **PANIC** are for the live bench.
+
+**MIDI 2:** the monitor names per-note bend/controllers and registered/assignable controllers (`M2 RC`, `M2 PN Bend`). Inject **MIDI 2** sends 16-bit velocity / 32-bit CC. Thru maps can use **C32** (32-bit constant). WinMM still downscales to MIDI 1; in-app loopbacks (`forge:loop:*`) pass UMP unchanged. Native `MidiSession` I/O is the next MIDI 2 I/O phase — see `docs/superpowers/specs/2026-08-26-midi2-roadmap.md`.
+
+**Record / Play SMF** on the monitor toolbar writes format-0 `.mid` files. **PE GET/SET** and a **Device** library live on the SysEx tab. Lua: `midi.after(ms, ev)`, `midi.state` (saved in the profile), optional `on_idle`. **Net** tab: UDP Network MIDI 2.0 invitation + UMP datagrams (port 5004).
+
+Capture, thru, Lua, and clock master run on a dedicated **midi-engine** thread (1 ms tick). The UI locks the engine only while drawing.
 
 **Scenes** (name + Save scene) store thru, Lua, mute clock, and throttle in the JSON profile. SysEx **pack** sends GM/GS/XG/Sequential/Korg/Yamaha dump requests. **CI Profiles** / **CI PE** are MIDI-CI inquiries (not full property-exchange JSON). MPE shows whether a zone is actually configured. **Add DAW loop** runs `midi loopback create` when MidiSrv and SDK Tools are present — still not a native `MidiSession`.
 

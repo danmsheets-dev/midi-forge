@@ -31,6 +31,8 @@ pub struct Scene {
     pub lua: String,
     #[serde(default)]
     pub lua_enabled: bool,
+    #[serde(default)]
+    pub lua_state: String,
 }
 
 fn default_mpe_members() -> u8 {
@@ -47,6 +49,7 @@ impl Scene {
             links: Vec::new(),
             lua: String::new(),
             lua_enabled: false,
+            lua_state: String::new(),
         }
     }
 }
@@ -69,6 +72,8 @@ pub struct Profile {
     #[serde(default)]
     pub lua_enabled: bool,
     #[serde(default)]
+    pub lua_state: String,
+    #[serde(default)]
     pub scenes: Vec<Scene>,
 }
 
@@ -83,6 +88,7 @@ impl Profile {
             links,
             lua: String::new(),
             lua_enabled: false,
+            lua_state: String::new(),
             scenes: Vec::new(),
         }
     }
@@ -113,6 +119,7 @@ impl Profile {
             links: self.links.clone(),
             lua: self.lua.clone(),
             lua_enabled: self.lua_enabled,
+            lua_state: self.lua_state.clone(),
         }
     }
 
@@ -124,6 +131,7 @@ impl Profile {
         self.links = scene.links.clone();
         self.lua = scene.lua.clone();
         self.lua_enabled = scene.lua_enabled;
+        self.lua_state = scene.lua_state.clone();
     }
 
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {

@@ -96,7 +96,7 @@ impl MatchKind {
     }
 }
 
-/// 7-bit value transform.
+/// 7-bit value transform, plus optional MIDI 2 32-bit variants.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValueMap {
@@ -109,6 +109,14 @@ pub enum ValueMap {
         in_max: u8,
         out_min: u8,
         out_max: u8,
+        invert: bool,
+    },
+    Constant32(u32),
+    Scale32 {
+        in_min: u32,
+        in_max: u32,
+        out_min: u32,
+        out_max: u32,
         invert: bool,
     },
 }
@@ -133,8 +141,68 @@ impl ValueMap {
                 };
                 scale_7bit(v, in_min, in_max, out_min, out_max)
             }
+            Self::Constant32(v) => crate::midi2::value32_to_7(v),
+            Self::Scale32 {
+                in_min,
+                in_max,
+                out_min,
+                out_max,
+                invert,
+            } => crate::midi2::value32_to_7(scale_32(
+                if invert {
+                    u32::MAX.saturating_sub(crate::midi2::value7_to_32(value))
+                } else {
+                    crate::midi2::value7_to_32(value)
+                },
+                in_min,
+                in_max,
+                out_min,
+                out_max,
+            )),
         }
     }
+
+    pub fn apply32(&self, value: u32) -> u32 {
+        match *self {
+            Self::Keep => value,
+            Self::Constant(v) => crate::midi2::value7_to_32(v),
+            Self::Offset(_) => {
+                crate::midi2::value7_to_32(self.apply(crate::midi2::value32_to_7(value)))
+            }
+            Self::Scale { .. } => {
+                crate::midi2::value7_to_32(self.apply(crate::midi2::value32_to_7(value)))
+            }
+            Self::Constant32(v) => v,
+            Self::Scale32 {
+                in_min,
+                in_max,
+                out_min,
+                out_max,
+                invert,
+            } => {
+                let v = if invert {
+                    u32::MAX.saturating_sub(value)
+                } else {
+                    value
+                };
+                scale_32(v, in_min, in_max, out_min, out_max)
+            }
+        }
+    }
+}
+
+fn scale_32(value: u32, in_min: u32, in_max: u32, out_min: u32, out_max: u32) -> u32 {
+    let lo = in_min.min(in_max);
+    let hi = in_min.max(in_max);
+    let v = value.clamp(lo, hi);
+    if hi == lo {
+        return out_min;
+    }
+    let t = u128::from(v.saturating_sub(in_min.min(in_max)));
+    let den = u128::from(hi - lo);
+    let span = i128::from(out_max) - i128::from(out_min);
+    let mapped = i128::from(out_min) + (t as i128) * span / den as i128;
+    mapped.clamp(0, i128::from(u32::MAX)) as u32
 }
 
 fn scale_7bit(value: u8, in_min: u8, in_max: u8, out_min: u8, out_max: u8) -> u8 {
@@ -262,6 +330,14 @@ fn rewrite_midi2(
     let old_w1 = packet.words().get(1).copied().unwrap_or(0);
     let w1 = if matches!(data2, ValueMap::Keep) {
         old_w1
+    } else if matches!(data2, ValueMap::Constant32(_) | ValueMap::Scale32 { .. }) {
+        match out_kind {
+            VoiceKind::NoteOn | VoiceKind::NoteOff => {
+                let v16 = (data2.apply32(old_w1) >> 16) as u16;
+                (u32::from(v16) << 16) | (old_w1 & 0xFFFF)
+            }
+            _ => data2.apply32(old_w1),
+        }
     } else {
         let scaled = crate::midi2::downscale_to_midi1(packet);
         let src_d2 = scaled.last().map(|p| p.data2()).unwrap_or(0);
@@ -432,6 +508,7 @@ impl DataMap {
             entries: vec![MapEntry {
                 matcher: Matcher {
                     kind: MatchKind::Notes,
+                    data2_min: 1,
                     ..Matcher::default()
                 },
                 action: MapAction::Rewrite {
@@ -532,7 +609,11 @@ mod tests {
     fn invert_velocity() {
         let map = DataMap::invert_velocity();
         assert_eq!(map.apply(&note_on(60, 127)), Some(note_on(60, 0)));
-        assert_eq!(map.apply(&note_on(60, 0)), Some(note_on(60, 127)));
+        assert_eq!(
+            map.apply(&note_on(60, 0)),
+            Some(note_on(60, 0)),
+            "0x90 vel 0 is a note-off and must not invert into a note-on"
+        );
     }
 
     #[test]
@@ -606,5 +687,30 @@ mod tests {
         assert_eq!(map.entries[0].matcher.data1_max, 74);
         assert!(Matcher::learn_from(&clock()).is_none());
         assert!(Matcher::learn_from(&note_on(60, 0)).is_none());
+    }
+
+    #[test]
+    fn midi2_cc_constant32() {
+        let map = DataMap {
+            pass_unmatched: true,
+            entries: vec![MapEntry {
+                matcher: Matcher {
+                    kind: MatchKind::One(VoiceKind::ControlChange),
+                    data1_min: 7,
+                    data1_max: 7,
+                    ..Matcher::default()
+                },
+                action: MapAction::Rewrite {
+                    kind: None,
+                    channel: None,
+                    data1: ValueMap::Keep,
+                    data2: ValueMap::Constant32(0x8000_0000),
+                },
+            }],
+        };
+        let m2 = crate::midi2::midi2_cc(0, 0, 7, 1);
+        let out = map.apply(&m2).expect("mapped");
+        assert_eq!(out.message_type(), 0x4);
+        assert_eq!(out.words()[1], 0x8000_0000);
     }
 }

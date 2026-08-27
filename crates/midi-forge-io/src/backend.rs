@@ -19,6 +19,27 @@ pub enum ProtocolHint {
     Ump,
 }
 
+/// What this backend can do natively. Phase 1: WinMM is MIDI 1 wire;
+/// loopbacks preserve UMP. Native `MidiSession` is a later backend.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackendCaps {
+    pub native_ump: bool,
+    pub scheduled_send: bool,
+    pub daw_visible_virtual: bool,
+    pub multi_client: bool,
+}
+
+impl Default for BackendCaps {
+    fn default() -> Self {
+        Self {
+            native_ump: false,
+            scheduled_send: false,
+            daw_visible_virtual: false,
+            multi_client: false,
+        }
+    }
+}
+
 impl ProtocolHint {
     pub fn label(self) -> &'static str {
         match self {
@@ -36,8 +57,9 @@ pub struct Endpoint {
     pub protocol: ProtocolHint,
 }
 
-/// Platform MIDI I/O.
-pub trait MidiBackend {
+/// Platform MIDI I/O. `Send` so the engine thread can own the backend
+/// (WinMM access is still mutex-serialized).
+pub trait MidiBackend: Send {
     fn name(&self) -> &'static str;
     fn refresh(&mut self) -> Result<(), IoError>;
     fn endpoints(&self) -> &[Endpoint];
@@ -54,6 +76,9 @@ pub trait MidiBackend {
     /// App-local virtual cable pair (in, out). Other processes do not see these.
     fn create_loopback(&mut self, name: &str) -> Result<(EndpointId, EndpointId), IoError>;
     fn remove_loopback(&mut self, id: &EndpointId) -> Result<(), IoError>;
+    fn caps(&self) -> BackendCaps {
+        BackendCaps::default()
+    }
 }
 
 pub fn default_backend() -> Box<dyn MidiBackend> {
@@ -79,5 +104,12 @@ mod tests {
     fn protocol_labels() {
         assert_eq!(ProtocolHint::Midi1Bytes.label(), "MIDI 1");
         assert_eq!(ProtocolHint::Ump.label(), "UMP");
+    }
+
+    #[test]
+    fn default_caps_are_midi1_wire() {
+        let c = super::BackendCaps::default();
+        assert!(!c.native_ump);
+        assert!(!c.scheduled_send);
     }
 }

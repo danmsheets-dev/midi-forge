@@ -1,14 +1,18 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use eframe::egui;
 use midi_forge_core::{
-    ClockHealth, HangTracker, LiveView, MessageKind, MidiEvent, MonitorLog, MpeTracker,
-    NrpnTracker, PortId, Profile, ProfileLink, RouteEvent, RouteLog, Router, Scene, SysexAssembler,
-    UmpMessage, decode, format_wire_hex, message_kind, panic_packets,
+    ClockHealth, ClockMaster, HangTracker, LiveView, MessageKind, MidiEvent, MonitorLog,
+    MpeTracker, NrpnTracker, PortId, Profile, ProfileLink, RouteEvent, RouteLog, Router, Scene,
+    SessionRecorder, SysexAssembler, UmpMessage, decode, format_wire_hex, message_kind,
+    panic_packets,
 };
 use midi_forge_io::{
-    Direction, Endpoint, EndpointId, MidiBackend, default_backend, explain_in_use, probe_wms,
+    Direction, Endpoint, EndpointId, MidiBackend, NetUmp, default_backend, explain_in_use,
+    probe_wms,
 };
 
 use crate::clock;
@@ -20,6 +24,13 @@ use crate::sysex::{self, Librarian};
 use crate::thru;
 
 pub struct MidiForgeApp {
+    inner: Arc<Mutex<EngineInner>>,
+    stop: Arc<AtomicBool>,
+}
+
+/// MIDI + UI state. The engine thread `try_lock`s this to tick; the UI
+/// `lock`s it while drawing and editing.
+pub(crate) struct EngineInner {
     pub(crate) backend: Box<dyn MidiBackend>,
     backend_name: String,
     pub(crate) endpoints: Vec<Endpoint>,
@@ -78,9 +89,51 @@ pub struct MidiForgeApp {
     pub(crate) scene_name: String,
     pub(crate) scenes: Vec<Scene>,
     pub(crate) pack_idx: usize,
+    pub(crate) master: ClockMaster,
+    pub(crate) master_dest: Option<String>,
+    pub(crate) inject_m2: bool,
+    pub(crate) recorder: SessionRecorder,
+    pub(crate) pe_header: String,
+    pub(crate) pe_body: String,
+    pub(crate) pe_note: String,
+    pub(crate) device_idx: usize,
+    pub(crate) net: NetUmp,
 }
 
 impl MidiForgeApp {
+    pub(crate) fn eng(&self) -> MutexGuard<'_, EngineInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let inner = Arc::new(Mutex::new(EngineInner::new(cc)));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = Arc::clone(&inner);
+        let halt = Arc::clone(&stop);
+        std::thread::Builder::new()
+            .name("midi-engine".into())
+            .spawn(move || engine_loop(worker, halt))
+            .expect("midi-engine thread");
+        Self { inner, stop }
+    }
+}
+
+impl Drop for MidiForgeApp {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+fn engine_loop(inner: Arc<Mutex<EngineInner>>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        if let Ok(mut g) = inner.try_lock() {
+            g.tick();
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+impl EngineInner {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         let mut backend: Box<dyn MidiBackend> = default_backend();
         let backend_name = backend.name().to_string();
@@ -148,6 +201,15 @@ impl MidiForgeApp {
             throttle_ms: 0,
             throttle_q: HashMap::new(),
             throttle_at: HashMap::new(),
+            master: ClockMaster::new(),
+            master_dest: None,
+            inject_m2: false,
+            recorder: SessionRecorder::default(),
+            pe_header: r#"{"resource":"DeviceInfo"}"#.into(),
+            pe_body: String::new(),
+            pe_note: String::new(),
+            device_idx: 0,
+            net: NetUmp::default(),
         };
 
         let inputs: Vec<EndpointId> = app
@@ -163,6 +225,90 @@ impl MidiForgeApp {
         }
         app.device_fp = device_fingerprint(&app.endpoints);
         app
+    }
+
+    pub(crate) fn tick(&mut self) {
+        self.drain_capture();
+        self.tick_throttle();
+        self.poll_hotplug();
+        self.tick_master();
+        self.tick_script_timers();
+        self.tick_net();
+    }
+
+    fn tick_master(&mut self) {
+        let now = self.host_ns();
+        let packets = self.master.poll(now);
+        let Some(dest) = self.master_dest.clone() else {
+            return;
+        };
+        if packets.is_empty() {
+            return;
+        }
+        let id = EndpointId(dest);
+        if !self.open_outputs.contains(&id.0) {
+            let _ = self.set_output_open(&id, true);
+        }
+        for packet in packets {
+            if let Err(err) = self.backend.send(&id, &packet) {
+                self.port_errors.insert(id.0.clone(), err.to_string());
+                break;
+            }
+        }
+    }
+
+    fn tick_script_timers(&mut self) {
+        let now = self.host_ns();
+        let extra = self.script.tick(now);
+        for event in extra {
+            if !self.paused {
+                self.log.push(event);
+                self.recorder.push(event);
+            }
+            let routed_list = self.router.route(&event);
+            for routed in routed_list {
+                let Some(dest) = self.endpoint_by_port.get(&routed.port).cloned() else {
+                    continue;
+                };
+                if !self.open_outputs.contains(&dest.0) {
+                    continue;
+                }
+                self.hang.push(&routed.packet);
+                let _ = self.backend.send(&dest, &routed.packet);
+            }
+        }
+    }
+
+    fn tick_net(&mut self) {
+        use midi_forge_core::{
+            CMD_INVITATION, decode_command, decode_ump, encode_command, looks_like_command,
+        };
+        let packets = self.net.poll();
+        for (from, bytes) in packets {
+            self.net.last = format!("{from} {} B", bytes.len());
+            if looks_like_command(&bytes) {
+                if let Some((cmd, _, _)) = decode_command(&bytes)
+                    && cmd == CMD_INVITATION
+                {
+                    let reply = encode_command(0x10, 0, &[]);
+                    let _ = self.net.send_bytes(&reply);
+                    self.net.last = format!("accepted invitation from {from}");
+                }
+                continue;
+            }
+            let port = self.ensure_port(&EndpointId("net:ump".into()));
+            for packet in decode_ump(&bytes) {
+                let ev = MidiEvent::new(
+                    midi_forge_core::Timestamp::from_nanos(self.host_ns()),
+                    port,
+                    packet,
+                );
+                if !self.paused {
+                    self.log.push(ev);
+                    self.recorder.push(ev);
+                }
+            }
+        }
     }
 
     pub(crate) fn ensure_port(&mut self, id: &EndpointId) -> PortId {
@@ -223,6 +369,11 @@ impl MidiForgeApp {
         to: &EndpointId,
         linked: bool,
     ) -> Result<(), String> {
+        if midi_forge_io::is_loopback_pair(&from.0, &to.0) {
+            return Err(
+                "Refusing loopback In→Out (that recirculates every event). Use two cables.".into(),
+            );
+        }
         if linked {
             self.set_input_open(from, true)?;
             self.set_output_open(to, true)?;
@@ -248,7 +399,7 @@ impl MidiForgeApp {
         explain_in_use(err, name)
     }
 
-    fn host_ns(&self) -> u64 {
+    pub(crate) fn host_ns(&self) -> u64 {
         self.host_epoch.elapsed().as_nanos() as u64
     }
 
@@ -259,6 +410,7 @@ impl MidiForgeApp {
         if !self.paused {
             for event in &events {
                 self.log.push(*event);
+                self.recorder.push(*event);
             }
         }
         let now = Instant::now();
@@ -268,7 +420,6 @@ impl MidiForgeApp {
             }
             let t_ns = self.host_ns();
             self.clock.push(&event.packet, t_ns);
-            self.hang.push(&event.packet);
             self.live.push(&event.packet);
             let _ = self.nrpn.push(&event.packet);
             self.mpe.push(&event.packet);
@@ -308,6 +459,7 @@ impl MidiForgeApp {
                     if !self.open_outputs.contains(&dest.0) {
                         continue;
                     }
+                    self.hang.push(&routed.packet);
                     if routed.packet.message_type() == 0x3 {
                         let asm = self.thru_sysex.entry(dest.0.clone()).or_default();
                         if let Some(dump) = asm.push(&routed.packet)
@@ -373,6 +525,8 @@ impl MidiForgeApp {
         self.hang.clear();
         self.live = LiveView::new();
         self.mpe.clear_voices();
+        self.throttle_q.clear();
+        self.throttle_at.clear();
         self.status = format!("Panic: sent {sent} short messages to open outputs");
     }
 
@@ -546,6 +700,7 @@ impl MidiForgeApp {
         let mut profile = Profile::new(links);
         profile.lua = self.script.source.clone();
         profile.lua_enabled = self.script.enabled();
+        profile.lua_state = self.script.export_state();
         profile.name = self.scene_name.clone();
         profile.mute_clock = self.mute_clock;
         profile.throttle_ms = self.throttle_ms;
@@ -628,6 +783,9 @@ impl MidiForgeApp {
             }
         }
         script::apply_profile_lua(self, profile.lua, profile.lua_enabled);
+        if !profile.lua_state.is_empty() {
+            self.script.import_state(&profile.lua_state);
+        }
         self.status = format!("Loaded {loaded} thru links ({skipped} skipped)");
     }
 
@@ -666,13 +824,19 @@ impl MidiForgeApp {
 }
 
 impl eframe::App for MidiForgeApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        self.drain_capture();
-        self.tick_throttle();
-        self.poll_hotplug();
-        sysex::tick_send(self, ui.ctx());
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        {
+            let mut eng = self.eng();
+            sysex::tick_send(&mut eng, ui.ctx());
+        }
         ui.ctx().request_repaint_after(Duration::from_millis(16));
+        let mut eng = self.eng();
+        EngineInner::ui(&mut eng, ui, frame);
+    }
+}
 
+impl EngineInner {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("banner").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Midi-Forge");
@@ -784,6 +948,18 @@ impl eframe::App for MidiForgeApp {
                             "Windows MIDI Services is running. WinMM sees MIDI 1 views of UMP devices. Native MidiSession I/O is a later phase.",
                         );
                     }
+                    let caps = self.backend.caps();
+                    if caps.native_ump {
+                        ui.colored_label(egui::Color32::from_rgb(80, 180, 140), "native UMP")
+                            .on_hover_text(
+                                "This backend can pass Universal MIDI Packets. WinMM still downscales to MIDI 1.",
+                            );
+                    } else {
+                        ui.weak("MIDI 1 wire")
+                            .on_hover_text(
+                                "WinMM downscales MIDI 2 to 7-bit. Loopbacks and a future MidiSession keep UMP. See docs/superpowers/specs/2026-08-26-midi2-roadmap.md",
+                            );
+                    }
                     ui.weak(format!("backend: {}", self.backend_name))
                         .on_hover_text(&self.wms_note);
                 });
@@ -867,11 +1043,18 @@ impl eframe::App for MidiForgeApp {
                     {
                         self.right_tab = RightTab::Lua;
                     }
+                    if ui
+                        .selectable_label(self.right_tab == RightTab::Net, "Net")
+                        .clicked()
+                    {
+                        self.right_tab = RightTab::Net;
+                    }
                 });
                 ui.separator();
                 match self.right_tab {
                     RightTab::Sysex => sysex::librarian_panel(ui, self),
                     RightTab::Lua => script::lua_panel(ui, self),
+                    RightTab::Net => net_panel(ui, self),
                 }
             });
 
@@ -989,7 +1172,37 @@ fn activity_dot(ui: &mut egui::Ui, last: Option<&Instant>) {
     ui.painter().circle_filled(rect.center(), 3.5, color);
 }
 
-fn stuck_notes_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+fn net_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
+    ui.heading("Network MIDI 2.0");
+    ui.weak("UDP UMP + invitation commands (M2-124 subset). Auth later.");
+    ui.horizontal(|ui| {
+        ui.label("Bind");
+        ui.add(egui::TextEdit::singleline(&mut app.net.bind).desired_width(140.0));
+        if ui.button("Listen").clicked() {
+            match app.net.listen() {
+                Ok(()) => app.status = app.net.last.clone(),
+                Err(err) => app.status = err.to_string(),
+            }
+        }
+        if ui.button("Close").clicked() {
+            app.net.close();
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Peer");
+        ui.add(egui::TextEdit::singleline(&mut app.net.peer).desired_width(140.0));
+        if ui.button("Invite").clicked() {
+            let pkt = midi_forge_core::invitation("Midi-Forge");
+            match app.net.send_bytes(&pkt) {
+                Ok(()) => app.status = "invitation sent".into(),
+                Err(err) => app.status = err.to_string(),
+            }
+        }
+    });
+    ui.weak(&app.net.last);
+}
+
+fn stuck_notes_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     let notes = app.hang.notes();
     if notes.is_empty() {
         return;
@@ -1015,7 +1228,7 @@ fn stuck_notes_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     });
 }
 
-fn monitor_toolbar(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+fn monitor_toolbar(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.horizontal_wrapped(|ui| {
         ui.add(
             egui::TextEdit::singleline(&mut app.mon_search)
@@ -1037,13 +1250,70 @@ fn monitor_toolbar(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         if ui.button("Export").clicked() {
             export_visible_log(app);
         }
+        let rec = if app.recorder.recording {
+            "Stop rec"
+        } else {
+            "Record"
+        };
+        if ui
+            .button(rec)
+            .on_hover_text("Record the monitor to SMF0")
+            .clicked()
+        {
+            app.recorder.recording = !app.recorder.recording;
+            if app.recorder.recording {
+                app.recorder.clear();
+                app.status = "Recording SMF…".into();
+            } else {
+                app.status = format!("Recorded {} events", app.recorder.len());
+            }
+        }
+        if !app.recorder.recording && app.recorder.len() > 0 && ui.button("Save SMF").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Standard MIDI", &["mid"])
+                .set_file_name("forge.mid")
+                .save_file()
+            {
+                match std::fs::write(&path, app.recorder.to_smf()) {
+                    Ok(()) => app.status = format!("Wrote {}", path.display()),
+                    Err(err) => app.status = err.to_string(),
+                }
+            }
+        }
+        if ui.button("Play SMF").clicked() {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("Standard MIDI", &["mid"])
+                .pick_file()
+            {
+                match std::fs::read(&path) {
+                    Ok(bytes) => match midi_forge_core::events_from_smf0(&bytes) {
+                        Ok(evs) => {
+                            let dest = app.inject_dest.clone();
+                            if let Some(id) = dest {
+                                let id = EndpointId(id);
+                                let _ = app.set_output_open(&id, true);
+                                for e in &evs {
+                                    let _ = app.send_packet(&id, &e.packet);
+                                }
+                                app.status = format!("Played {} events", evs.len());
+                            } else {
+                                app.status = "Pick an inject output first".into();
+                            }
+                        }
+                        Err(err) => app.status = err,
+                    },
+                    Err(err) => app.status = err.to_string(),
+                }
+            }
+        }
+        ui.weak(format!("{} rec", app.recorder.len()));
     });
 }
 
-fn event_passes_monitor(app: &MidiForgeApp, event: &MidiEvent) -> bool {
+fn event_passes_monitor(app: &EngineInner, event: &MidiEvent) -> bool {
     let kind = message_kind(&event.packet);
     let type_ok = match kind {
-        MessageKind::Note => app.mon_notes,
+        MessageKind::Note | MessageKind::PerNote => app.mon_notes,
         MessageKind::ControlChange => app.mon_cc,
         MessageKind::Clock | MessageKind::ActiveSensing => app.mon_clock,
         MessageKind::Sysex => app.mon_sysex,
@@ -1071,7 +1341,7 @@ fn event_passes_monitor(app: &MidiForgeApp, event: &MidiEvent) -> bool {
         || port.to_lowercase().contains(&q)
 }
 
-fn visible_log_indices(app: &MidiForgeApp) -> Vec<usize> {
+fn visible_log_indices(app: &EngineInner) -> Vec<usize> {
     (0..app.log.len())
         .filter(|&i| app.log.get(i).is_some_and(|e| event_passes_monitor(app, e)))
         .collect()
@@ -1090,7 +1360,7 @@ fn format_event_line(event: &MidiEvent, names: &HashMap<PortId, String>) -> Stri
     )
 }
 
-fn format_visible_log(app: &MidiForgeApp) -> String {
+fn format_visible_log(app: &EngineInner) -> String {
     visible_log_indices(app)
         .into_iter()
         .filter_map(|i| app.log.get(i))
@@ -1099,7 +1369,7 @@ fn format_visible_log(app: &MidiForgeApp) -> String {
         .join("\n")
 }
 
-fn export_visible_log(app: &mut MidiForgeApp) {
+fn export_visible_log(app: &mut EngineInner) {
     let Some(path) = rfd::FileDialog::new()
         .add_filter("Text", &["txt", "csv"])
         .set_file_name("midi-forge-log.txt")

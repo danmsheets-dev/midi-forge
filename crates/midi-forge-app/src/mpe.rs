@@ -2,9 +2,9 @@ use eframe::egui;
 use midi_forge_core::{MpeZoneKind, bend_semitones, mcm_packets, pitch_bend_range_packets};
 use midi_forge_io::{Direction, EndpointId, create_wms_loopback};
 
-use crate::app::MidiForgeApp;
+use crate::app::EngineInner;
 
-pub fn mpe_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+pub fn mpe_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.horizontal(|ui| {
         ui.heading("MPE");
         let summary = app.mpe.mode_summary();
@@ -119,7 +119,7 @@ fn mini_bar(ui: &mut egui::Ui, value: u8, color: egui::Color32) {
     ui.painter().rect_filled(fill, 1.0, color);
 }
 
-fn send_packets(app: &mut MidiForgeApp, packets: &[midi_forge_core::UmpMessage], what: &str) {
+fn send_packets(app: &mut EngineInner, packets: &[midi_forge_core::UmpMessage], what: &str) {
     let Some(dest) = app
         .endpoints
         .iter()
@@ -152,7 +152,7 @@ fn send_packets(app: &mut MidiForgeApp, packets: &[midi_forge_core::UmpMessage],
     app.status = format!("Sent {what} ({sent} packets) to {}", dest.0);
 }
 
-fn send_pb_range(app: &mut MidiForgeApp, channel: u8, semitones: u8) {
+fn send_pb_range(app: &mut EngineInner, channel: u8, semitones: u8) {
     send_packets(
         app,
         &pitch_bend_range_packets(channel, semitones),
@@ -160,7 +160,7 @@ fn send_pb_range(app: &mut MidiForgeApp, channel: u8, semitones: u8) {
     );
 }
 
-fn send_mcm(app: &mut MidiForgeApp, zone: MpeZoneKind) {
+fn send_mcm(app: &mut EngineInner, zone: MpeZoneKind) {
     let members = app.mpe_members;
     send_packets(
         app,
@@ -169,7 +169,7 @@ fn send_mcm(app: &mut MidiForgeApp, zone: MpeZoneKind) {
     );
 }
 
-fn add_wms_loop(app: &mut MidiForgeApp) {
+fn add_wms_loop(app: &mut EngineInner) {
     match create_wms_loopback(&app.cable_name) {
         Ok(msg) => {
             app.refresh_devices();
@@ -179,7 +179,7 @@ fn add_wms_loop(app: &mut MidiForgeApp) {
     }
 }
 
-pub fn virtual_cables_ui(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+pub fn virtual_cables_ui(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.separator();
     ui.heading("Virtual cables");
     ui.weak(
@@ -227,7 +227,7 @@ pub fn virtual_cables_ui(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
     }
 }
 
-fn add_cable(app: &mut MidiForgeApp) {
+fn add_cable(app: &mut EngineInner) {
     let name = app.cable_name.clone();
     match app.backend.create_loopback(&name) {
         Ok((inp, outp)) => {
@@ -240,7 +240,7 @@ fn add_cable(app: &mut MidiForgeApp) {
     }
 }
 
-fn remove_cable(app: &mut MidiForgeApp, id: &EndpointId) {
+fn remove_cable(app: &mut EngineInner, id: &EndpointId) {
     let _ = app.set_input_open(id, false);
     if let Some(out) = id.0.strip_suffix(":in") {
         let out_id = EndpointId(format!("{out}:out"));

@@ -171,29 +171,10 @@ impl MidiBackend for CoreMidiBackend {
     }
 
     fn send(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError> {
-        let buf = event_buffer(packet);
-        if let Ok(i) = parse_index(&id.0, "coremidi:dst:") {
-            let dest = Destination::from_index(i).ok_or_else(|| IoError::NotFound(id.0.clone()))?;
-            let port = self
-                .output_port
-                .as_ref()
-                .ok_or_else(|| IoError::Backend("no output port".into()))?;
-            port.send(&dest, &buf)
-                .map_err(|e| IoError::Backend(format!("send: {e}")))?;
-            return Ok(());
+        for packet in midi_forge_core::downscale_to_midi1(packet) {
+            self.send_one(id, &packet)?;
         }
-        if let Some(idx) = parse_suffix(&id.0, "coremidi:vs:") {
-            let src = self
-                .virtual_sources
-                .iter()
-                .find(|(n, _)| *n == idx)
-                .ok_or_else(|| IoError::NotFound(id.0.clone()))?;
-            src.1
-                .received(&buf)
-                .map_err(|e| IoError::Backend(format!("virtual send: {e}")))?;
-            return Ok(());
-        }
-        Err(IoError::NotFound(id.0.clone()))
+        Ok(())
     }
 
     fn send_sysex(&mut self, id: &EndpointId, bytes: &[u8]) -> Result<(), IoError> {
@@ -263,9 +244,44 @@ impl MidiBackend for CoreMidiBackend {
         self.rebuild_endpoints();
         Ok(())
     }
+
+    fn caps(&self) -> crate::backend::BackendCaps {
+        crate::backend::BackendCaps {
+            native_ump: true,
+            scheduled_send: false,
+            daw_visible_virtual: true,
+            multi_client: true,
+        }
+    }
 }
 
 impl CoreMidiBackend {
+    fn send_one(&mut self, id: &EndpointId, packet: &UmpMessage) -> Result<(), IoError> {
+        let buf = event_buffer(packet);
+        if let Ok(i) = parse_index(&id.0, "coremidi:dst:") {
+            let dest = Destination::from_index(i).ok_or_else(|| IoError::NotFound(id.0.clone()))?;
+            let port = self
+                .output_port
+                .as_ref()
+                .ok_or_else(|| IoError::Backend("no output port".into()))?;
+            port.send(&dest, &buf)
+                .map_err(|e| IoError::Backend(format!("send: {e}")))?;
+            return Ok(());
+        }
+        if let Some(idx) = parse_suffix(&id.0, "coremidi:vs:") {
+            let src = self
+                .virtual_sources
+                .iter()
+                .find(|(n, _)| *n == idx)
+                .ok_or_else(|| IoError::NotFound(id.0.clone()))?;
+            src.1
+                .received(&buf)
+                .map_err(|e| IoError::Backend(format!("virtual send: {e}")))?;
+            return Ok(());
+        }
+        Err(IoError::NotFound(id.0.clone()))
+    }
+
     fn rebuild_endpoints(&mut self) {
         let owned = self.owned_unique_ids();
         let mut endpoints = Vec::new();

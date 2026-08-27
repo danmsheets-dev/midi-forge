@@ -1,14 +1,15 @@
 use eframe::egui;
 
-use crate::app::MidiForgeApp;
+use crate::app::EngineInner;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RightTab {
     Sysex,
     Lua,
+    Net,
 }
 
-pub fn lua_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
+pub fn lua_panel(ui: &mut egui::Ui, app: &mut EngineInner) {
     ui.heading("Lua");
     ui.weak("Runs on captured events before thru. Monitor still shows the wire.");
     ui.separator();
@@ -83,14 +84,14 @@ pub fn lua_panel(ui: &mut egui::Ui, app: &mut MidiForgeApp) {
         });
 }
 
-fn apply_script(app: &mut MidiForgeApp) {
+fn apply_script(app: &mut EngineInner) {
     match app.script.reload() {
         Ok(()) => app.status = "Lua compiled".into(),
         Err(err) => app.status = format!("Lua: {err}"),
     }
 }
 
-fn load_lua(app: &mut MidiForgeApp) {
+fn load_lua(app: &mut EngineInner) {
     let Some(path) = rfd::FileDialog::new()
         .add_filter("Lua", &["lua"])
         .pick_file()
@@ -107,7 +108,7 @@ fn load_lua(app: &mut MidiForgeApp) {
     }
 }
 
-fn save_lua(app: &mut MidiForgeApp) {
+fn save_lua(app: &mut EngineInner) {
     let Some(path) = rfd::FileDialog::new()
         .add_filter("Lua", &["lua"])
         .set_file_name("midi-forge.lua")
@@ -121,7 +122,7 @@ fn save_lua(app: &mut MidiForgeApp) {
     }
 }
 
-pub fn apply_profile_lua(app: &mut MidiForgeApp, source: String, enabled: bool) {
+pub fn apply_profile_lua(app: &mut EngineInner, source: String, enabled: bool) {
     if !source.is_empty() {
         app.script.source = source;
         let _ = app.script.reload();

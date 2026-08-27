@@ -111,6 +111,46 @@ pub enum Decoded {
         channel: u8,
         value: u32,
     },
+    Midi2RegisteredController {
+        group: u8,
+        channel: u8,
+        bank: u8,
+        index: u8,
+        value: u32,
+    },
+    Midi2AssignableController {
+        group: u8,
+        channel: u8,
+        bank: u8,
+        index: u8,
+        value: u32,
+    },
+    Midi2PerNotePitchBend {
+        group: u8,
+        channel: u8,
+        note: u8,
+        value: u32,
+    },
+    Midi2RegisteredPerNote {
+        group: u8,
+        channel: u8,
+        note: u8,
+        index: u8,
+        value: u32,
+    },
+    Midi2AssignablePerNote {
+        group: u8,
+        channel: u8,
+        note: u8,
+        index: u8,
+        value: u32,
+    },
+    Midi2PerNoteManagement {
+        group: u8,
+        channel: u8,
+        note: u8,
+        flags: u8,
+    },
     Other {
         message_type: u8,
         group: u8,
@@ -216,6 +256,49 @@ impl Decoded {
             Self::Midi2PitchBend { channel, value, .. } => {
                 format!("Ch{} M2 PitchBend {value}", channel + 1)
             }
+            Self::Midi2RegisteredController {
+                channel,
+                bank,
+                index,
+                value,
+                ..
+            } => format!("Ch{} M2 RC bank {bank} idx {index} {value}", channel + 1),
+            Self::Midi2AssignableController {
+                channel,
+                bank,
+                index,
+                value,
+                ..
+            } => format!("Ch{} M2 AC bank {bank} idx {index} {value}", channel + 1),
+            Self::Midi2PerNotePitchBend {
+                channel,
+                note,
+                value,
+                ..
+            } => format!("Ch{} M2 PN Bend note {note} {value}", channel + 1),
+            Self::Midi2RegisteredPerNote {
+                channel,
+                note,
+                index,
+                value,
+                ..
+            } => format!("Ch{} M2 PN RC note {note} idx {index} {value}", channel + 1),
+            Self::Midi2AssignablePerNote {
+                channel,
+                note,
+                index,
+                value,
+                ..
+            } => format!("Ch{} M2 PN AC note {note} idx {index} {value}", channel + 1),
+            Self::Midi2PerNoteManagement {
+                channel,
+                note,
+                flags,
+                ..
+            } => format!(
+                "Ch{} M2 PN Mgmt note {note} flags {flags:#04X}",
+                channel + 1
+            ),
             Self::Other {
                 message_type,
                 status,
@@ -248,6 +331,12 @@ impl Decoded {
             Self::Midi2ProgramChange { .. } => "m2_program",
             Self::Midi2ChannelPressure { .. } => "m2_channel_pressure",
             Self::Midi2PitchBend { .. } => "m2_pitch_bend",
+            Self::Midi2RegisteredController { .. } => "m2_rc",
+            Self::Midi2AssignableController { .. } => "m2_ac",
+            Self::Midi2PerNotePitchBend { .. } => "m2_pn_bend",
+            Self::Midi2RegisteredPerNote { .. } => "m2_pn_rc",
+            Self::Midi2AssignablePerNote { .. } => "m2_pn_ac",
+            Self::Midi2PerNoteManagement { .. } => "m2_pn_mgmt",
             Self::Other { .. } => "other",
         }
     }
@@ -394,6 +483,46 @@ fn decode_midi2_channel(msg: &UmpMessage) -> Decoded {
             channel,
             value: w1,
         },
+        0x20 => Decoded::Midi2RegisteredController {
+            group,
+            channel,
+            bank: d1,
+            index: msg.data2(),
+            value: w1,
+        },
+        0x30 => Decoded::Midi2AssignableController {
+            group,
+            channel,
+            bank: d1,
+            index: msg.data2(),
+            value: w1,
+        },
+        0x60 => Decoded::Midi2PerNotePitchBend {
+            group,
+            channel,
+            note: d1,
+            value: w1,
+        },
+        0x00 => Decoded::Midi2RegisteredPerNote {
+            group,
+            channel,
+            note: d1,
+            index: msg.data2(),
+            value: w1,
+        },
+        0x10 => Decoded::Midi2AssignablePerNote {
+            group,
+            channel,
+            note: d1,
+            index: msg.data2(),
+            value: w1,
+        },
+        0xF0 => Decoded::Midi2PerNoteManagement {
+            group,
+            channel,
+            note: d1,
+            flags: msg.data2(),
+        },
         _ => Decoded::Other {
             message_type: 0x4,
             group,
@@ -516,5 +645,22 @@ mod tests {
         assert_eq!(decode(&cc).summary(), "Ch1 M2 CC7 (Volume) 2147483648");
         let pb = UmpMessage::midi2_channel_voice(0, 0xE4, 0, 0, 0x8000_0000);
         assert_eq!(decode(&pb).summary(), "Ch5 M2 PitchBend 2147483648");
+    }
+
+    #[test]
+    fn decodes_midi2_per_note_and_controllers() {
+        use crate::midi2::{
+            midi2_assignable_controller, midi2_per_note_pitch_bend, midi2_registered_controller,
+            midi2_registered_per_note,
+        };
+        let rc = midi2_registered_controller(0, 0, 0, 6, 0x8000_0000);
+        assert_eq!(decode(&rc).kind_key(), "m2_rc");
+        assert!(decode(&rc).summary().contains("M2 RC"));
+        let ac = midi2_assignable_controller(0, 1, 2, 3, 1);
+        assert_eq!(decode(&ac).kind_key(), "m2_ac");
+        let pnb = midi2_per_note_pitch_bend(0, 4, 60, 0x8000_0000);
+        assert_eq!(decode(&pnb).kind_key(), "m2_pn_bend");
+        let pnrc = midi2_registered_per_note(0, 0, 64, 7, 99);
+        assert_eq!(decode(&pnrc).kind_key(), "m2_pn_rc");
     }
 }

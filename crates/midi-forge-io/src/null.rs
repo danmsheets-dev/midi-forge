@@ -174,6 +174,15 @@ impl MidiBackend for NullBackend {
         self.sync_endpoints();
         Ok(())
     }
+
+    fn caps(&self) -> crate::backend::BackendCaps {
+        crate::backend::BackendCaps {
+            native_ump: true,
+            scheduled_send: false,
+            daw_visible_virtual: false,
+            multi_client: true,
+        }
+    }
 }
 
 impl NullBackend {

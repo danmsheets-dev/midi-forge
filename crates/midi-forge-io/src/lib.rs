@@ -4,6 +4,7 @@
 mod backend;
 mod error;
 mod loopback;
+mod net;
 mod null;
 mod occupy;
 mod wms;
@@ -15,8 +16,12 @@ mod winmm;
 #[path = "coremidi.rs"]
 mod coremidi_backend;
 
-pub use backend::{Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint, default_backend};
+pub use backend::{
+    BackendCaps, Direction, Endpoint, EndpointId, MidiBackend, ProtocolHint, default_backend,
+};
 pub use error::IoError;
+pub use loopback::is_loopback_pair;
+pub use net::NetUmp;
 pub use null::NullBackend;
 pub use occupy::{explain_in_use, likely_midi_holders};
 pub use wms::{WmsStatus, create_wms_loopback, midi_cli_path, probe_wms};

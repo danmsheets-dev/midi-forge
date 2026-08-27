@@ -12,6 +12,7 @@ pub struct Midi1Parser {
     got: u8,
     need: u8,
     sysex: Vec<u8>,
+    emitted: usize,
     in_sysex: bool,
 }
 
@@ -35,6 +36,7 @@ impl Midi1Parser {
             got: 0,
             need: 0,
             sysex: Vec::new(),
+            emitted: 0,
             in_sysex: false,
         }
     }
@@ -59,13 +61,24 @@ impl Midi1Parser {
 
         if self.in_sysex {
             if byte == 0xF7 {
-                emit_sysex(self.group, &self.sysex, true, out);
+                flush_sysex(self, true, out);
                 self.sysex.clear();
+                self.emitted = 0;
                 self.in_sysex = false;
             } else if byte < 0x80 {
+                if self.sysex.len() >= SYSEX_CAP {
+                    flush_sysex(self, true, out);
+                    self.sysex.clear();
+                    self.emitted = 0;
+                    self.in_sysex = false;
+                    return;
+                }
                 self.sysex.push(byte);
+                flush_sysex(self, false, out);
             } else {
+                flush_sysex(self, true, out);
                 self.sysex.clear();
+                self.emitted = 0;
                 self.in_sysex = false;
                 self.push_byte(byte, out);
             }
@@ -78,6 +91,7 @@ impl Midi1Parser {
             self.need = 0;
             self.got = 0;
             self.sysex.clear();
+            self.emitted = 0;
             self.in_sysex = true;
             return;
         }
@@ -127,37 +141,42 @@ impl Midi1Parser {
     }
 }
 
+const SYSEX_CAP: usize = 65_536;
+
+fn flush_sysex(parser: &mut Midi1Parser, ended: bool, out: &mut Vec<UmpMessage>) {
+    loop {
+        let remain = parser.sysex.len().saturating_sub(parser.emitted);
+        if remain == 0 {
+            if ended && parser.emitted == 0 {
+                out.push(UmpMessage::sysex7(parser.group, 0, &[]));
+            }
+            break;
+        }
+        if !ended && remain < 6 {
+            break;
+        }
+        let take = remain.min(6);
+        let first = parser.emitted == 0;
+        let last = ended && parser.emitted + take == parser.sysex.len();
+        let status = sysex_chunk_status(first, last);
+        out.push(UmpMessage::sysex7(
+            parser.group,
+            status,
+            &parser.sysex[parser.emitted..parser.emitted + take],
+        ));
+        parser.emitted += take;
+        if take < 6 {
+            break;
+        }
+    }
+}
+
 fn sysex_chunk_status(is_start: bool, is_end: bool) -> u8 {
     match (is_start, is_end) {
         (true, true) => 0,   // complete
         (true, false) => 1,  // start
         (false, false) => 2, // continue
         (false, true) => 3,  // end
-    }
-}
-
-fn emit_sysex(group: u8, payload: &[u8], ended: bool, out: &mut Vec<UmpMessage>) {
-    if payload.is_empty() && ended {
-        out.push(UmpMessage::sysex7(group, 0, &[]));
-        return;
-    }
-    let mut offset = 0;
-    let mut first = true;
-    while offset < payload.len() || (ended && first && payload.is_empty()) {
-        let remain = payload.len() - offset;
-        let take = remain.min(6);
-        let last = ended && offset + take == payload.len();
-        let status = sysex_chunk_status(first, last);
-        out.push(UmpMessage::sysex7(
-            group,
-            status,
-            &payload[offset..offset + take],
-        ));
-        offset += take;
-        first = false;
-        if take == 0 {
-            break;
-        }
     }
 }
 
@@ -361,13 +380,24 @@ mod tests {
     }
 
     #[test]
-    fn aborted_sysex_is_not_emitted() {
+    fn aborted_sysex_emits_truncated_then_status() {
         let mut p = Midi1Parser::new();
         let msgs = p.push_slice(&[0xF0, 0x01, 0x02, 0x90, 60, 127]);
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0].message_type(), 0x2);
-        assert_eq!(msgs[0].status_byte(), 0x90);
-        assert_eq!(msgs[0].data1(), 60);
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].message_type(), 0x3);
+        assert_eq!(msgs[1].message_type(), 0x2);
+        assert_eq!(msgs[1].status_byte(), 0x90);
+    }
+
+    #[test]
+    fn long_sysex_emits_start_before_f7() {
+        let mut p = Midi1Parser::new();
+        let mid = p.push_slice(&[0xF0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(mid.len(), 1);
+        assert_eq!((mid[0].words()[0] >> 20) & 0xF, 1);
+        let end = p.push_slice(&[7, 8, 0xF7]);
+        assert_eq!(end.len(), 1);
+        assert_eq!((end[0].words()[0] >> 20) & 0xF, 3);
     }
 
     #[test]

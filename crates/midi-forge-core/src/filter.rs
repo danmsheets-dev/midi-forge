@@ -17,6 +17,7 @@ pub enum MessageKind {
     ActiveSensing,
     Reset,
     SystemCommon,
+    PerNote,
     Other,
 }
 
@@ -38,7 +39,8 @@ pub fn message_kind(msg: &UmpMessage) -> MessageKind {
             0xC0 => MessageKind::ProgramChange,
             0xD0 => MessageKind::ChannelPressure,
             0xE0 => MessageKind::PitchBend,
-            0x00 | 0x10 | 0x20 | 0x30 | 0x40 | 0x50 => MessageKind::ControlChange,
+            0x20 | 0x30 | 0x40 | 0x50 => MessageKind::ControlChange,
+            0x00 | 0x10 | 0xF0 => MessageKind::PerNote,
             0x60 => MessageKind::PitchBend,
             _ => MessageKind::Other,
         },
@@ -72,6 +74,9 @@ pub struct Filter {
     pub reset: bool,
     pub system_common: bool,
     pub other: bool,
+    /// MIDI 2 per-note controllers, per-note bend is pitch_bend.
+    #[serde(default = "default_true")]
+    pub per_note: bool,
     /// Bit `i` enables MIDI channel `i` (0–15).
     pub channels: u16,
     /// If set, rewrite channel-voice packets to this channel after the mask.
@@ -94,10 +99,15 @@ impl Default for Filter {
             reset: true,
             system_common: true,
             other: true,
+            per_note: true,
             channels: 0xFFFF,
             force_channel: None,
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Filter {
@@ -133,6 +143,7 @@ impl Filter {
             MessageKind::ActiveSensing => self.active_sensing,
             MessageKind::Reset => self.reset,
             MessageKind::SystemCommon => self.system_common,
+            MessageKind::PerNote => self.per_note,
             MessageKind::Other => self.other,
         }
     }
@@ -244,5 +255,17 @@ mod tests {
             ..Filter::default()
         };
         assert_eq!(f.apply(&rpn), None);
+    }
+
+    #[test]
+    fn midi2_per_note_has_own_filter() {
+        let pn = UmpMessage::midi2_channel_voice(0, 0x00, 60, 7, 1);
+        assert_eq!(message_kind(&pn), MessageKind::PerNote);
+        let f = Filter {
+            per_note: false,
+            ..Filter::default()
+        };
+        assert_eq!(f.apply(&pn), None);
+        assert!(Filter::default().apply(&pn).is_some());
     }
 }
